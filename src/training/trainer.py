@@ -4,6 +4,23 @@ import yaml
 import logging
 import torch
 import numpy as np
+# Monkey-patch numpy.dtypes.StringDType for compatibility with JAX on older numpy versions
+try:
+    import numpy.dtypes as np_dtypes
+except ImportError:
+    import sys
+    import types
+    np_dtypes = types.ModuleType("numpy.dtypes")
+    sys.modules["numpy.dtypes"] = np_dtypes
+    np.dtypes = np_dtypes
+
+if not hasattr(np_dtypes, "StringDType"):
+    class MockStringDType:
+        def __init__(self, *args, **kwargs):
+            pass
+    np_dtypes.StringDType = MockStringDType
+    np.dtypes.StringDType = MockStringDType
+
 import evaluate
 from datasets import Dataset
 from transformers import (
