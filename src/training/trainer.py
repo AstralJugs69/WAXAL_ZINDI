@@ -1,0 +1,217 @@
+import os
+import argparse
+import yaml
+import logging
+import torch
+import numpy as np
+import evaluate
+from datasets import Dataset
+from transformers import (
+    Seq2SeqTrainer, 
+    Seq2SeqTrainingArguments, 
+    Trainer, 
+    TrainingArguments,
+    Wav2Vec2Processor,
+    WhisperProcessor,
+    Wav2Vec2ForCTC,
+    WhisperForConditionalGeneration
+)
+from src.data.dataset import prepare_datasets, normalize_text
+from src.data.filter import filter_dataset
+from src.data.augment import ASRDataCollatorWithPadding, DynamicAugmentator
+from src.models.mms_model import get_mms_model_with_adapter, load_processor_for_mms
+from src.models.whisper_model import get_whisper_lora_model
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("trainer")
+
+# Metrics
+wer_metric = evaluate.load("wer")
+cer_metric = evaluate.load("cer")
+
+def get_compute_metrics_fn(processor, is_seq2seq):
+    """
+    Returns the metric computation function for evaluation.
+    Handles CTC logits (argmax) vs Seq2Seq generated tokens.
+    """
+    def compute_metrics(pred):
+        pred_ids = pred.predictions
+        label_ids = pred.label_ids
+        
+        # CTC logits needs argmax, Seq2Seq predictions are token IDs
+        if not is_seq2seq:
+            if isinstance(pred_ids, tuple):
+                pred_ids = pred_ids[0]
+            pred_ids = np.argmax(pred_ids, axis=-1)
+            
+        # Replace -100 in labels
+        label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+        
+        # Decode
+        pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
+        label_str = processor.batch_decode(label_ids, skip_special_tokens=True)
+        
+        # Normalize transcripts to ensure we evaluate on cleaned texts
+        pred_str = [normalize_text(p) for p in pred_str]
+        label_str = [normalize_text(l) for l in label_str]
+        
+        # Filter out empty references to avoid division by zero
+        valid_preds = []
+        valid_labels = []
+        for p, l in zip(pred_str, label_str):
+            if l.strip():
+                valid_preds.append(p)
+                valid_labels.append(l)
+                
+        if not valid_labels:
+            return {"wer": 1.0, "cer": 1.0, "final_score": 1.0}
+            
+        wer = wer_metric.compute(predictions=valid_preds, references=valid_labels)
+        cer = cer_metric.compute(predictions=valid_preds, references=valid_labels)
+        final_score = 0.5 * wer + 0.5 * cer
+        
+        return {"wer": wer, "cer": cer, "final_score": final_score}
+        
+    return compute_metrics
+
+def main():
+    parser = argparse.ArgumentParser(description="ASR Model Fine-tuning Script")
+    parser.add_argument("--config", type=str, required=True, help="Path to config YAML file")
+    parser.add_argument("--fold", type=int, default=0, help="Fold index to train (0 to k_folds-1)")
+    parser.add_argument("--target_lang", type=str, default="lin", help="Target language (lin, sna, lug)")
+    args = parser.parse_args()
+    
+    # 1. Load config file
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+        
+    model_id = config["model_id"]
+    is_seq2seq = "whisper" in model_id.lower()
+    logger.info(f"Loaded config: {args.config}. Model type: {'Seq2Seq (Whisper)' if is_seq2seq else 'CTC (MMS)'}")
+    
+    # 2. Prepare datasets
+    data_config = config["data"]
+    train_df, _ = prepare_datasets(
+        train_csv_path=data_config["train_csv"],
+        test_csv_path=data_config["test_csv"],
+        languages=[args.target_lang],
+        k_folds=data_config["k_folds"]
+    )
+    
+    # Filter by language
+    train_df = train_df[train_df["language"] == args.target_lang]
+    
+    # Filter using speech rate and duration heuristics
+    train_df = filter_dataset(
+        train_df,
+        duration_min=data_config["duration_min"],
+        duration_max=data_config["duration_max"],
+        wps_min=data_config["wps_min"],
+        wps_max=data_config["wps_max"]
+    )
+    
+    # Get train and validation splits based on target fold
+    train_split_df = train_df[train_df["fold"] != args.fold]
+    val_split_df = train_df[train_df["fold"] == args.fold]
+    
+    logger.info(f"Train split size: {len(train_split_df)} || Val split size: {len(val_split_df)}")
+    
+    # Convert to Hugging Face Dataset
+    train_dataset = Dataset.from_pandas(train_split_df)
+    val_dataset = Dataset.from_pandas(val_split_df)
+    
+    # 3. Load processor and model
+    if is_seq2seq:
+        processor = WhisperProcessor.from_pretrained(model_id, language=args.target_lang, task="transcribe")
+        model = get_whisper_lora_model(
+            model_id=model_id,
+            r=config["peft"]["r"],
+            lora_alpha=config["peft"]["lora_alpha"],
+            target_modules=config["peft"]["target_modules"],
+            lora_dropout=config["peft"]["lora_dropout"],
+            load_in_8bit=True,
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        )
+    else:
+        processor = load_processor_for_mms(model_id=model_id, target_lang=args.target_lang)
+        model = get_mms_model_with_adapter(
+            model_id=model_id,
+            target_lang=args.target_lang,
+            freeze_feature_extractor=True
+        )
+        
+    # Ensure all targets are mapped
+    train_dataset = train_dataset.cast_column("audio", Dataset.Audio(sampling_rate=16000))
+    val_dataset = val_dataset.cast_column("audio", Dataset.Audio(sampling_rate=16000))
+    
+    # 4. Setup augmentator and data collator
+    augmentator = DynamicAugmentator()
+    data_collator = ASRDataCollatorWithPadding(
+        processor=processor,
+        augmentator=augmentator,
+        is_seq2seq=is_seq2seq,
+        sampling_rate=16000
+    )
+    
+    # 5. Training arguments
+    train_args = config["training"]
+    output_dir = f"outputs/{args.target_lang}_{model_id.split('/')[-1]}_fold{args.fold}"
+    
+    training_class = Seq2SeqTrainingArguments if is_seq2seq else TrainingArguments
+    
+    training_kwargs = {
+        "output_dir": output_dir,
+        "per_device_train_batch_size": train_args["per_device_train_batch_size"],
+        "gradient_accumulation_steps": train_args["gradient_accumulation_steps"],
+        "learning_rate": float(train_args["learning_rate"]),
+        "warmup_steps": train_args["warmup_steps"],
+        "num_train_epochs": train_args["num_train_epochs"],
+        "gradient_checkpointing": train_args["gradient_checkpointing"],
+        "fp16": train_args["fp16"] and torch.cuda.is_available(),
+        "evaluation_strategy": train_args["evaluation_strategy"],
+        "eval_steps": train_args["eval_steps"],
+        "save_steps": train_args["save_steps"],
+        "logging_steps": train_args["logging_steps"],
+        "save_total_limit": train_args["save_total_limit"],
+        "load_best_model_at_end": train_args["load_best_model_at_end"],
+        "metric_for_best_model": "final_score" if is_seq2seq else train_args["metric_for_best_model"],
+        "greater_is_better": False,
+        "weight_decay": train_args["weight_decay"],
+        "remove_unused_columns": False,
+        "report_to": ["none"]
+    }
+    
+    if is_seq2seq:
+        training_kwargs["predict_with_generate"] = True
+        training_kwargs["generation_max_length"] = 225
+        
+    trainer_args = training_class(**training_kwargs)
+    
+    # 6. Initialize trainer
+    trainer_class = Seq2SeqTrainer if is_seq2seq else Trainer
+    
+    trainer = trainer_class(
+        model=model,
+        args=trainer_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        data_collator=data_collator,
+        compute_metrics=get_compute_metrics_fn(processor, is_seq2seq)
+    )
+    
+    # 7. Start training
+    logger.info("Starting model training...")
+    trainer.train()
+    
+    # Save the best model
+    logger.info(f"Saving best model to {output_dir}/best_model")
+    processor.save_pretrained(f"{output_dir}/best_model")
+    if is_seq2seq:
+        model.save_pretrained(f"{output_dir}/best_model")
+    else:
+        # Save CTC adapter weights specifically
+        model.save_pretrained(f"{output_dir}/best_model")
+
+if __name__ == "__main__":
+    main()
