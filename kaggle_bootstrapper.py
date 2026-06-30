@@ -73,7 +73,7 @@ def main():
     if tpu_active:
         print("Installing PyTorch/XLA 2.8.0 wheels for TPU VMs (Python 3.12)...")
         run_command_live([
-            "pip", "install", "numpy", 
+            "pip", "install", "--upgrade", "numpy>=2.0.0", 
             "torch==2.8.0", "torch_xla[tpu]==2.8.0", 
             "-f", "https://storage.googleapis.com/libtpu-releases/index.html"
         ])
