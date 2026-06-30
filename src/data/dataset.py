@@ -35,11 +35,41 @@ def normalize_text(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+def resolve_csv_path(csv_path):
+    """
+    Resolves the actual location of the CSV files by checking the current directory,
+    parent directory, /kaggle/working, or searching /kaggle/input.
+    """
+    if os.path.exists(csv_path):
+        return csv_path
+        
+    # 1. Try parent directory
+    parent_path = os.path.join("..", csv_path)
+    if os.path.exists(parent_path):
+        return parent_path
+        
+    # 2. Try /kaggle/working/
+    basename = os.path.basename(csv_path)
+    kaggle_working = os.path.join("/kaggle/working", basename)
+    if os.path.exists(kaggle_working):
+        return kaggle_working
+        
+    # 3. Search inside /kaggle/input/
+    if os.path.exists("/kaggle/input"):
+        for root, dirs, files in os.walk("/kaggle/input"):
+            if basename in files:
+                resolved = os.path.join(root, basename)
+                logger.info(f"Auto-discovered CSV file at: {resolved}")
+                return resolved
+                
+    return csv_path
+
 def parse_robust_csv(csv_path):
     """
     Parses a Zindi CSV file with robust handling of unescaped quotes,
     commas inside fields, and multiline cells.
     """
+    csv_path = resolve_csv_path(csv_path)
     logger.info(f"Parsing CSV file robustly: {csv_path}")
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
