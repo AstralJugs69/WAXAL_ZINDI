@@ -122,6 +122,11 @@ def main():
     val_dataset = Dataset.from_pandas(val_split_df)
     
     # 3. Load processor and model
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Target device resolved: {device}")
+    if torch.cuda.is_available():
+        logger.info(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
+        
     if is_seq2seq:
         processor = WhisperProcessor.from_pretrained(model_id, language=args.target_lang, task="transcribe")
         model = get_whisper_lora_model(
@@ -131,7 +136,7 @@ def main():
             target_modules=config["peft"]["target_modules"],
             lora_dropout=config["peft"]["lora_dropout"],
             load_in_8bit=True,
-            device="cuda" if torch.cuda.is_available() else "cpu"
+            device=device
         )
     else:
         processor = load_processor_for_mms(model_id=model_id, target_lang=args.target_lang)
@@ -140,6 +145,7 @@ def main():
             target_lang=args.target_lang,
             freeze_feature_extractor=True
         )
+        model = model.to(device)
         
     # Ensure all targets are mapped
     train_dataset = train_dataset.cast_column("audio", Dataset.Audio(sampling_rate=16000))
