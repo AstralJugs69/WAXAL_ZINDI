@@ -14,6 +14,7 @@ echo "================================="
 # Set environment variables for optimized execution
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
+export PYTHONPATH=.
 
 python src/training/trainer.py \
     --config "$CONFIG" \
