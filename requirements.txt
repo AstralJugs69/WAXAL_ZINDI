@@ -1,5 +1,6 @@
 transformers>=4.35.0
-datasets>=2.14.0
+datasets>=2.19.0
+pyarrow<16.0.0
 peft>=0.6.0
 bitsandbytes>=0.41.0
 accelerate>=0.24.0
