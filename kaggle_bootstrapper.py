@@ -71,10 +71,10 @@ def main():
     print(f"\n=== TPU Accelerator Detected: {tpu_active} ===")
     
     if tpu_active:
-        print("Installing PyTorch/XLA 2.7.0 wheels for TPU VMs...")
+        print("Installing PyTorch/XLA 2.8.0 wheels for TPU VMs (Python 3.12)...")
         run_command_live([
             "pip", "install", "numpy", 
-            "torch==2.7.0", "torch_xla[tpu]==2.7.0", 
+            "torch==2.8.0", "torch_xla[tpu]==2.8.0", 
             "-f", "https://storage.googleapis.com/libtpu-releases/index.html"
         ])
 
