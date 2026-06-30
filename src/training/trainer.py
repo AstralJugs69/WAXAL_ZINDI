@@ -1,4 +1,5 @@
 import os
+os.environ["JAX_PLATFORMS"] = "cpu"  # Prevent JAX from locking TPU device on import
 import argparse
 import yaml
 import logging
