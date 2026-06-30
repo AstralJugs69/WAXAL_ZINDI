@@ -33,8 +33,8 @@ def main():
     
     logger.info(f"Bundling workspace from {repo_dir} into {output_path}...")
     
-    # We include src/, config/, scripts/, and requirements.txt
-    include_paths = ["src", "config", "scripts", "requirements.txt"]
+    # We include src/, config/, scripts/, requirements.txt, Train.csv, and Test.csv
+    include_paths = ["src", "config", "scripts", "requirements.txt", "Train.csv", "Test.csv"]
     
     with tarfile.open(output_path, "w:gz") as tar:
         for path in include_paths:
