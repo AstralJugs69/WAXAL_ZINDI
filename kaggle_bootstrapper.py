@@ -36,6 +36,9 @@ def main():
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
     print("=== Step 1: Retrieving Codebase ===")
+    # Change directory to working_dir first so we aren't in a deleted directory
+    os.chdir(working_dir)
+    
     if os.path.exists(project_dir):
         print("Found existing project directory. Removing to get a fresh clone...")
         shutil.rmtree(project_dir)
