@@ -3,13 +3,22 @@ set -eo pipefail
 
 echo "=== Installing System Dependencies ==="
 if [ -f /etc/debian_version ]; then
-    sudo apt-get update && sudo apt-get install -y \
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+    $SUDO apt-get update && $SUDO apt-get install -y \
         ffmpeg \
         cmake \
         build-essential \
-        libsndfile1
+        libsndfile1 \
+        libboost-all-dev \
+        zlib1g-dev \
+        libbz2-dev \
+        liblzma-dev
 else
-    echo "Warning: Non-debian system detected. Please install ffmpeg, cmake, build-essential, and libsndfile manually."
+    echo "Warning: Non-debian system detected. Please install ffmpeg, cmake, build-essential, libsndfile, boost, zlib, bz2, and lzma manually."
 fi
 
 echo "=== Installing Python Requirements ==="
