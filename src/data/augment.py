@@ -152,17 +152,33 @@ class ASRDataCollatorWithPadding:
         processor: Any, 
         augmentator: DynamicAugmentator = None,
         is_seq2seq: bool = False,
-        sampling_rate: int = 16000
+        sampling_rate: int = 16000,
+        static_buckets: bool = False
     ):
         self.processor = processor
         self.augmentator = augmentator
         self.is_seq2seq = is_seq2seq
         self.sampling_rate = sampling_rate
+        self.static_buckets = static_buckets
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # Split inputs and labels
         # Audio preprocessing
         input_features = []
+        
+        # Resolve target sequence length for static bucketing (for CTC inputs)
+        target_audio_len = None
+        if self.static_buckets and not self.is_seq2seq:
+            max_len = max(len(feature["audio"]["array"]) for feature in features)
+            # quantiles-based bucket sizes (at 16kHz)
+            # representing 1.5s, 3.0s, 6.0s, 12.0s, 18.0s, 24.0s, 30.0s
+            audio_buckets = [24000, 48000, 96000, 192000, 288000, 384000, 480000]
+            target_audio_len = audio_buckets[-1]
+            for b in audio_buckets:
+                if max_len <= b:
+                    target_audio_len = b
+                    break
+
         for feature in features:
             audio_info = feature["audio"]
             y = audio_info["array"]
@@ -178,9 +194,16 @@ class ASRDataCollatorWithPadding:
             if self.augmentator is not None:
                 y = self.augmentator(y, sr)
                 
+            # Pad to the resolved static bucket size
+            if target_audio_len is not None:
+                if len(y) < target_audio_len:
+                    y = np.pad(y, (0, target_audio_len - len(y)), 'constant')
+                else:
+                    y = y[:target_audio_len]
+                
             # Process waveform
             if self.is_seq2seq:
-                # Whisper features
+                # Whisper features (always outputs exactly 3000 frames)
                 processed = self.processor.feature_extractor(y, sampling_rate=sr, return_tensors="pt")
                 input_features.append({"input_features": processed.input_features[0]})
             else:
@@ -203,6 +226,24 @@ class ASRDataCollatorWithPadding:
                 label_features.append({"input_ids": tokenized.input_ids})
                 
         if label_features:
+            # Resolve target label length for static bucketing
+            if self.static_buckets:
+                max_label_len = max(len(l["input_ids"]) for l in label_features)
+                label_buckets = [16, 32, 64, 96, 128, 192, 256]
+                target_label_len = label_buckets[-1]
+                for b in label_buckets:
+                    if max_label_len <= b:
+                        target_label_len = b
+                        break
+                # Pad token IDs manually to static target label length
+                pad_id = self.processor.tokenizer.pad_token_id or 0
+                for l in label_features:
+                    curr_len = len(l["input_ids"])
+                    if curr_len < target_label_len:
+                        l["input_ids"] = l["input_ids"] + [pad_id] * (target_label_len - curr_len)
+                    else:
+                        l["input_ids"] = l["input_ids"][:target_label_len]
+                        
             labels_batch = self.processor.tokenizer.pad(
                 label_features,
                 return_tensors="pt"

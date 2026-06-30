@@ -64,13 +64,28 @@ def main():
                 for f in files[:10]:
                     print(f"{'  ' * (depth + 1)}[FILE] {f}")
                     
+    # Detect if TPU environment is active
+    tpu_active = False
+    if os.environ.get("TPU_NAME") or os.environ.get("TPU_ACCELERATOR_TYPE") or os.path.exists("/usr/share/tpu-support"):
+        tpu_active = True
+    print(f"\n=== TPU Accelerator Detected: {tpu_active} ===")
+    
+    if tpu_active:
+        print("Installing PyTorch/XLA 2.7.0 wheels for TPU VMs...")
+        run_command_live([
+            "pip", "install", "numpy", 
+            "torch==2.7.0", "torch_xla[tpu]==2.7.0", 
+            "-f", "https://storage.googleapis.com/libtpu-releases/index.html"
+        ])
+
     print("\n=== Step 3: Installing Dependencies & Compiling KenLM ===")
     run_command_live(["bash", "scripts/install_dependencies.sh"])
 
     print("\n=== Step 4: Kickstarting Model Training Pipeline ===")
     # Starts fine-tuning the MMS-300M model on Lingala for fold 0
-    # Arguments: [config_path] [fold_index] [target_language]
-    run_command_live(["bash", "scripts/run_training.sh", "config/base_mms.yaml", "0", "lin"])
+    # Arguments: [config_path] [fold_index] [target_language] [tpu_flag]
+    tpu_flag = "--tpu" if tpu_active else ""
+    run_command_live(["bash", "scripts/run_training.sh", "config/base_mms.yaml", "0", "lin", tpu_flag])
 
     print("\n=== Bootstrapping and Training Pipeline Completed Successfully ===")
 
