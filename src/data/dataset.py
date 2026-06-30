@@ -37,31 +37,48 @@ def normalize_text(text):
 
 def resolve_csv_path(csv_path):
     """
-    Resolves the actual location of the CSV files by checking the current directory,
-    parent directory, /kaggle/working, or searching /kaggle/input.
+    Resolves the actual location of the CSV files case-insensitively by checking
+    the current directory, parent directory, /kaggle/working, or searching /kaggle/input.
     """
     if os.path.exists(csv_path):
         return csv_path
         
-    # 1. Try parent directory
-    parent_path = os.path.join("..", csv_path)
-    if os.path.exists(parent_path):
-        return parent_path
+    basename_lower = os.path.basename(csv_path).lower()
+    
+    # 1. Try current directory case-insensitively
+    try:
+        for f in os.listdir("."):
+            if f.lower() == basename_lower:
+                return f
+    except Exception:
+        pass
         
-    # 2. Try /kaggle/working/
-    basename = os.path.basename(csv_path)
-    kaggle_working = os.path.join("/kaggle/working", basename)
-    if os.path.exists(kaggle_working):
-        return kaggle_working
+    # 2. Try parent directory case-insensitively
+    try:
+        for f in os.listdir(".."):
+            if f.lower() == basename_lower:
+                return os.path.join("..", f)
+    except Exception:
+        pass
         
-    # 3. Search inside /kaggle/input/
+    # 3. Try /kaggle/working/ case-insensitively
+    if os.path.exists("/kaggle/working"):
+        try:
+            for f in os.listdir("/kaggle/working"):
+                if f.lower() == basename_lower:
+                    return os.path.join("/kaggle/working", f)
+        except Exception:
+            pass
+            
+    # 4. Search inside /kaggle/input/ case-insensitively
     if os.path.exists("/kaggle/input"):
         for root, dirs, files in os.walk("/kaggle/input"):
-            if basename in files:
-                resolved = os.path.join(root, basename)
-                logger.info(f"Auto-discovered CSV file at: {resolved}")
-                return resolved
-                
+            for f in files:
+                if f.lower() == basename_lower:
+                    resolved = os.path.join(root, f)
+                    logger.info(f"Auto-discovered CSV file at: {resolved}")
+                    return resolved
+                    
     return csv_path
 
 def parse_robust_csv(csv_path):
