@@ -54,6 +54,16 @@ def main():
         if os.path.exists(script_path):
             os.chmod(script_path, 0o755)
 
+    print("\n=== Scanning Kaggle Workspace Files ===")
+    if os.path.exists("/kaggle"):
+        for root, dirs, files in os.walk("/kaggle"):
+            # Limit depth to keep logs concise
+            depth = root.replace("/kaggle", "").count(os.sep)
+            if depth <= 3 and ".git" not in root and "__pycache__" not in root:
+                print(f"{'  ' * depth}[DIR] {root}")
+                for f in files[:10]:
+                    print(f"{'  ' * (depth + 1)}[FILE] {f}")
+                    
     print("\n=== Step 3: Installing Dependencies & Compiling KenLM ===")
     run_command_live(["bash", "scripts/install_dependencies.sh"])
 
