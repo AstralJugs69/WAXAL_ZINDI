@@ -18,7 +18,8 @@ def get_mms_model_with_adapter(
     model = Wav2Vec2ForCTC.from_pretrained(
         model_id,
         target_lang=target_lang,
-        ignore_mismatched_sizes=True
+        ignore_mismatched_sizes=True,
+        adapter_attn_dim=16
     )
     
     # Freeze Wav2Vec2 feature encoder for CTC stability in low-resource setups
