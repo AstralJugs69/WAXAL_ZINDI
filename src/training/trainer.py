@@ -312,6 +312,9 @@ def run_training(args, config, is_tpu=False, index=0):
     trainer_args = training_class(**training_kwargs)
     
     # 6. Initialize trainer
+    from src.utils.observability import ObservabilityCallback
+    obs_callback = ObservabilityCallback(output_dir=output_dir)
+    
     trainer_class = Seq2SeqTrainer if is_seq2seq else Trainer
     
     trainer = trainer_class(
@@ -321,7 +324,8 @@ def run_training(args, config, is_tpu=False, index=0):
         eval_dataset=val_dataset,
         data_collator=data_collator,
         compute_metrics=get_compute_metrics_fn(processor, is_seq2seq),
-        processing_class=processor.feature_extractor  # Required for CTC padding
+        processing_class=processor.feature_extractor,  # Required for CTC padding
+        callbacks=[obs_callback]
     )
     
     # 7. Start training
