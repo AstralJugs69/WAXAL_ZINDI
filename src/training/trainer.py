@@ -265,8 +265,7 @@ def run_training(args, config, is_tpu=False, index=0):
         "metric_for_best_model": "final_score" if is_seq2seq else train_args["metric_for_best_model"],
         "greater_is_better": False,
         "weight_decay": train_args["weight_decay"],
-        # GPU memory optimizations
-        "group_by_length": train_args.get("group_by_length", True),  # Batch similar-length samples → less padding waste
+        "group_by_length": train_args.get("group_by_length", False),  # Disabled to prevent LengthGroupedSampler error when dynamic padding is used
         "dataloader_num_workers": train_args.get("dataloader_num_workers", 2),
         "remove_unused_columns": False,
         "report_to": ["none"]
