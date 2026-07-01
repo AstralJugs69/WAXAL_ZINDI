@@ -144,26 +144,28 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
     """
     Loads google/WaxalNLP metadata from Hugging Face for specified configs
     to map ID to speaker_id and audio path info.
+    Uses decode=False so audio is stored as raw bytes/path dict (no torchcodec needed).
+    Actual decoding happens later via cast_column("audio", Audio(sampling_rate=16000)).
     """
+    from datasets import Audio as HFAudio
     logger.info(f"Fetching speaker metadata from Hugging Face google/WaxalNLP for {languages}")
     id_to_meta = {}
     
     for lang in languages:
         config_name = f"{lang}_asr"
         try:
-            # We only load the metadata split to speed up building the ID mapping
-            # Using streaming=True keeps the initial metadata fetch lightweight
             ds_dict = load_dataset("google/WaxalNLP", config_name)
+            # Disable audio decoding so we can iterate without torchcodec
             for split in ds_dict.keys():
-                for example in ds_dict[split]:
+                split_ds = ds_dict[split].cast_column("audio", HFAudio(decode=False))
+                for example in split_ds:
                     ex_id = example.get("id") or example.get("client_id")
-                    # Match ID to the one in Train.csv
-                    # Sometimes IDs in HF have slightly different suffixes, we handle prefixes
                     if ex_id:
                         id_to_meta[ex_id] = {
                             "speaker_id": example.get("speaker_id") or example.get("client_id") or "unknown_speaker",
-                            "audio": example.get("audio")
+                            "audio": example.get("audio")  # {"path": ..., "bytes": ...} — decoded later
                         }
+            logger.info(f"Loaded {sum(1 for v in id_to_meta.values() if v)} metadata entries for {lang}")
         except Exception as e:
             logger.warning(f"Could not load Hugging Face config {config_name} for metadata mapping: {e}")
             
