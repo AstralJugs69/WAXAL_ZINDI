@@ -1,5 +1,11 @@
 import os
 os.environ["JAX_PLATFORMS"] = "cpu"  # Prevent JAX from locking TPU device on import
+
+# Remove Kaggle environment variables that interfere with PJRT single-host auto-detection
+for env_var in ["TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID"]:
+    if env_var in os.environ:
+        os.environ.pop(env_var)
+
 import argparse
 import yaml
 import logging
