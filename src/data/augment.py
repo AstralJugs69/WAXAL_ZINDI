@@ -162,6 +162,8 @@ class ASRDataCollatorWithPadding:
         self.static_buckets = static_buckets
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        from src.data.dataset import get_audio_data
+        
         # Split inputs and labels
         # Audio preprocessing
         input_features = []
@@ -169,7 +171,12 @@ class ASRDataCollatorWithPadding:
         # Resolve target sequence length for static bucketing (for CTC inputs)
         target_audio_len = None
         if self.static_buckets and not self.is_seq2seq:
-            max_len = max(len(feature["audio"]["array"]) for feature in features)
+            lengths = []
+            for feature in features:
+                arr, _ = get_audio_data(feature["audio"])
+                if arr is not None:
+                    lengths.append(len(arr))
+            max_len = max(lengths) if lengths else 0
             # quantiles-based bucket sizes (at 16kHz)
             # representing 1.5s, 3.0s, 6.0s, 12.0s, 18.0s, 24.0s, 30.0s
             audio_buckets = [24000, 48000, 96000, 192000, 288000, 384000, 480000]
@@ -181,8 +188,9 @@ class ASRDataCollatorWithPadding:
 
         for feature in features:
             audio_info = feature["audio"]
-            y = audio_info["array"]
-            sr = audio_info["sampling_rate"]
+            y, sr = get_audio_data(audio_info)
+            if y is None or sr is None:
+                continue
             
             # Ensure target sampling rate (usually 16000)
             if sr != self.sampling_rate:

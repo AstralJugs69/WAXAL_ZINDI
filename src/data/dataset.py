@@ -9,6 +9,42 @@ from datasets import load_dataset, Dataset, Audio
 
 logger = logging.getLogger(__name__)
 
+def get_audio_data(audio_info):
+    """
+    Robustly extracts the raw audio numpy array and sampling rate from an audio feature representation.
+    Supports standard dict format, custom properties, and datasets >= 4.0.0 AudioDecoder object (based on torchcodec).
+    """
+    if audio_info is None:
+        return None, None
+        
+    # Case 1: AudioDecoder object (datasets >= 4.0.0 / torchcodec integration)
+    if hasattr(audio_info, "get_all_samples"):
+        try:
+            samples = audio_info.get_all_samples()
+            array = samples.data
+            # If the data is a PyTorch tensor, convert it to a NumPy array
+            if hasattr(array, "numpy"):
+                array = array.numpy()
+            return array, samples.sample_rate
+        except Exception as e:
+            logger.warning(f"Error decoding via AudioDecoder.get_all_samples: {e}")
+            
+    # Case 2: Standard dictionary representation
+    if isinstance(audio_info, dict):
+        return audio_info.get("array"), audio_info.get("sampling_rate")
+        
+    # Case 3: Duck typing for objects with attributes
+    if hasattr(audio_info, "array") and hasattr(audio_info, "sampling_rate"):
+        return audio_info.array, audio_info.sampling_rate
+        
+    # Case 4: Subscription fallback (in case it is dictionary-like)
+    try:
+        return audio_info["array"], audio_info["sampling_rate"]
+    except Exception:
+        pass
+        
+    return None, None
+
 def normalize_text(text):
     """
     Standardizes punctuation, converts to lowercase, applies NFKC unicode normalization,

@@ -222,10 +222,12 @@ def run_training(args, config, is_tpu=False, index=0):
         logger.info(f"Applying duration [{data_config['duration_min']}s, {data_config['duration_max']}s] and WPS [{data_config['wps_min']}, {data_config['wps_max']}] filters to HF datasets...")
         
     def hf_filter_fn(example):
+        from src.data.dataset import get_audio_data
         audio_info = example["audio"]
-        if not audio_info or audio_info.get("array") is None:
+        array, sr = get_audio_data(audio_info)
+        if array is None or sr is None:
             return False
-        duration = len(audio_info["array"]) / audio_info["sampling_rate"]
+        duration = len(array) / sr
         if duration < data_config["duration_min"] or duration > data_config["duration_max"]:
             return False
         transcript = example.get("normalized_transcription") or example.get("transcription") or ""
