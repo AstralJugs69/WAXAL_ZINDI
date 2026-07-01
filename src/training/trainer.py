@@ -142,9 +142,22 @@ def run_training(args, config, is_tpu=False, index=0):
     # Lazily construct HF datasets using select to avoid copying raw audio bytes to RAM
     from datasets import concatenate_datasets
     from src.data.dataset import load_waxal_dataset_clean
-    if (not is_tpu) or (index == 0):
+    
+    if is_tpu:
+        import torch_xla.core.xla_model as xm
+        # Force only the master process (Core 0) to load and cache the dataset first
+        if xm.is_master_ordinal():
+            logger.info(f"Master process (Core 0) caching HF dataset for language '{args.target_lang}'...")
+            load_waxal_dataset_clean(args.target_lang)
+        
+        # Block other TPU cores until master is done caching
+        xm.rendezvous("load_dataset_barrier")
+        
+        # Now all cores load the cached dataset (runs instantly, no duplicate download/disk write)
+        full_ds = load_waxal_dataset_clean(args.target_lang)
+    else:
         logger.info(f"Loading HF dataset for language '{args.target_lang}' cleanly...")
-    full_ds = load_waxal_dataset_clean(args.target_lang)
+        full_ds = load_waxal_dataset_clean(args.target_lang)
     
     def build_lazy_dataset(split_df):
         id_to_label = dict(zip(split_df["id"], split_df["normalized_transcription"]))
