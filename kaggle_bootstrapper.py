@@ -36,15 +36,21 @@ def main():
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
     print("=== Step 1: Retrieving Codebase ===")
-    # Change directory to working_dir first so we aren't in a deleted directory
     os.chdir(working_dir)
     
     if os.path.exists(project_dir):
-        print("Found existing project directory. Removing to get a fresh clone...")
-        shutil.rmtree(project_dir)
-
-    # Clone repository
-    run_command_live(["git", "clone", repo_url, project_dir])
+        print("Found existing project directory. Resetting and pulling latest changes...")
+        try:
+            # Reset local commits to fetch latest changes without conflicts
+            run_command_live(["git", "reset", "--hard"], cwd=project_dir)
+            run_command_live(["git", "pull"], cwd=project_dir)
+        except Exception as e:
+            print(f"Git pull/reset failed: {e}. Re-cloning fresh...")
+            shutil.rmtree(project_dir)
+            run_command_live(["git", "clone", repo_url, project_dir])
+    else:
+        run_command_live(["git", "clone", repo_url, project_dir])
+        
     os.chdir(project_dir)
     print(f"Current working directory set to: {os.getcwd()}")
 
