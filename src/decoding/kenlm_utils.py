@@ -114,3 +114,76 @@ def train_kenlm_model(text_path, arpa_path, binary_path, kenlm_dir="kenlm"):
     
     logger.info(f"Successfully compiled KenLM model: {binary_path}")
     return binary_path
+
+
+def build_language_model(transcripts, output_dir, kenlm_dir="kenlm", order=5):
+    """
+    High-level helper: builds a KenLM n-gram LM binary from a list of transcript
+    strings extracted from the training set.
+
+    Workflow:
+        transcripts → lm_corpus.txt → lmplz → lm.arpa → build_binary → lm.bin
+
+    Skips re-compilation if lm.bin already exists (safe across training restarts).
+
+    Parameters
+    ----------
+    transcripts : list[str]  — raw/normalised transcript strings
+    output_dir  : str        — directory where lm_corpus.txt, lm.arpa, lm.bin are written
+    kenlm_dir   : str        — path to the compiled KenLM source tree
+    order       : int        — n-gram order (default 5)
+
+    Returns
+    -------
+    Path to the compiled lm.bin, or None if compilation fails.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    text_path   = os.path.join(output_dir, "lm_corpus.txt")
+    arpa_path   = os.path.join(output_dir, "lm.arpa")
+    binary_path = os.path.join(output_dir, "lm.bin")
+
+    if os.path.exists(binary_path):
+        logger.info(f"LM binary already exists at {binary_path}. Skipping rebuild.")
+        return binary_path
+
+    try:
+        lmplz_path, build_binary_path = compile_kenlm(kenlm_dir)
+    except Exception as exc:
+        logger.warning(f"KenLM binaries not available ({exc}). Skipping LM build.")
+        return None
+
+    # 1. Write transcript corpus to plain-text file
+    clean_lines = [t.strip() for t in transcripts if t and t.strip()]
+    logger.info(f"Writing {len(clean_lines)} transcript lines to {text_path}")
+    with open(text_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(clean_lines) + "\n")
+
+    # 2. Run lmplz (--discount_fallback prevents crashes on small corpora)
+    logger.info(f"Running lmplz (order={order}) to produce ARPA file...")
+    try:
+        with open(text_path, "rb") as stdin_fh, open(arpa_path, "wb") as arpa_fh:
+            subprocess.run(
+                [lmplz_path, "-o", str(order), "--discount_fallback"],
+                stdin=stdin_fh,
+                stdout=arpa_fh,
+                check=True,
+            )
+        logger.info(f"ARPA model written to {arpa_path}")
+    except subprocess.CalledProcessError as exc:
+        logger.error(f"lmplz failed: {exc}. LM build aborted.")
+        return None
+
+    # 3. Compress ARPA → trie binary
+    logger.info("Compressing ARPA to trie binary with build_binary...")
+    try:
+        subprocess.run(
+            [build_binary_path, "trie", arpa_path, binary_path],
+            check=True,
+        )
+        logger.info(f"KenLM binary ready at {binary_path}")
+    except subprocess.CalledProcessError as exc:
+        logger.error(f"build_binary failed: {exc}. LM build aborted.")
+        return None
+
+    return binary_path

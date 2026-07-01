@@ -266,6 +266,24 @@ def run_training(args, config, is_tpu=False, index=0):
     
     if (not is_tpu) or (index == 0):
         logger.info(f"After duration/WPS filter — Train dataset: {len(train_dataset)} || Val dataset: {len(val_dataset)}")
+
+    # -----------------------------------------------------------------------
+    # Optionally load external open-source corpora (Common Voice, FLEURS)
+    # and concatenate with WAXAL training data to prevent acoustic overfitting.
+    # Only loads on GPU (index == 0 on TPU to avoid multi-process download races).
+    # -----------------------------------------------------------------------
+    if data_config.get("use_external_corpora", False) and ((not is_tpu) or (index == 0)):
+        try:
+            from src.data.external_corpora import load_external_corpus
+            from datasets import concatenate_datasets as _ext_cat
+            ext_sources = data_config.get("external_corpora_sources", ["common_voice", "fleurs"])
+            logger.info(f"Loading external corpora for '{args.target_lang}': {ext_sources}")
+            external_ds = load_external_corpus(args.target_lang, sources=ext_sources)
+            if external_ds is not None and len(external_ds) > 0:
+                train_dataset = _ext_cat([train_dataset, external_ds])
+                logger.info(f"Train dataset after external corpora merge: {len(train_dataset)} examples")
+        except Exception as exc:
+            logger.warning(f"External corpora loading failed ({exc}). Continuing with WAXAL data only.")
     
     # JIT warm-up dummy step for TPU to pre-populate compilation cache
     if is_tpu and index == 0:
@@ -362,6 +380,32 @@ def run_training(args, config, is_tpu=False, index=0):
         logger.info(f"Saving best model to {output_dir}/best_model")
         processor.save_pretrained(f"{output_dir}/best_model")
         model.save_pretrained(f"{output_dir}/best_model")
+
+        # -------------------------------------------------------------------
+        # Build KenLM language model binary from training transcripts.
+        # This runs once on the master process after training and is a no-op
+        # if lm.bin already exists (safe to restart).
+        # -------------------------------------------------------------------
+        try:
+            from src.decoding.kenlm_utils import build_language_model
+            all_transcripts = list(train_split_df["normalized_transcription"].dropna())
+            lm_output_dir = f"{output_dir}/best_model"
+            logger.info(f"Building KenLM language model from {len(all_transcripts)} training transcripts...")
+            lm_bin_path = build_language_model(
+                transcripts=all_transcripts,
+                output_dir=lm_output_dir,
+                kenlm_dir="kenlm",
+                order=5,
+            )
+            if lm_bin_path:
+                logger.info(f"KenLM binary saved at: {lm_bin_path}")
+                # Write path to a sidecar file so inference pipeline can discover it
+                lm_ref_path = f"{output_dir}/best_model/lm_bin_path.txt"
+                with open(lm_ref_path, "w") as _f:
+                    _f.write(lm_bin_path)
+                logger.info(f"LM path reference written to {lm_ref_path}")
+        except Exception as exc:
+            logger.warning(f"KenLM LM build failed ({exc}). Inference will fall back to greedy decoding.")
 
 def tpu_worker(index, args, config):
     """

@@ -33,6 +33,11 @@ data:
   wps_min: 1.0
   wps_max: 8.0
   k_folds: 5
+  use_external_corpora: true           # Load Common Voice + FLEURS to expand training pool
+  external_corpora_sources:            # Sources loaded via src/data/external_corpora.py
+    - common_voice
+    - fleurs
+
 
 decoding:
   beam_width: 128
