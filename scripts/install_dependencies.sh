@@ -23,13 +23,15 @@ fi
 
 echo "=== Checking GPU Architecture ==="
 if command -v nvidia-smi &> /dev/null; then
-    if nvidia-smi | grep -q "P100"; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "")
+    echo "GPU Name Detected: $GPU_NAME"
+    if [[ "$GPU_NAME" == *"P100"* ]]; then
         echo "Tesla P100 GPU detected. Reinstalling sm_60 (Pascal) compatible PyTorch, Torchaudio, and Torchvision wheels..."
         pip install --force-reinstall \
             torch torchaudio torchvision \
             --index-url https://download.pytorch.org/whl/cu118
     else
-        echo "GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
+        echo "GPU detected: $GPU_NAME (compatibility check passed)"
     fi
 fi
 
