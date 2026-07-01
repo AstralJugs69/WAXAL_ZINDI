@@ -21,11 +21,17 @@ else
     echo "Warning: Non-debian system detected. Please install ffmpeg, cmake, build-essential, libsndfile, boost, zlib, bz2, and lzma manually."
 fi
 
+echo "=== Generating PyTorch Version Constraints ==="
+# Pin current torch, torchaudio, torchvision, and numpy versions to prevent pip from overwriting them with incompatible PyPI wheels
+pip freeze | grep -E "^(torch|torchaudio|torchvision|numpy|intel-openmp|mkl)==" > constraints.txt
+echo "Generated constraints:"
+cat constraints.txt
+
 echo "=== Installing Python Requirements ==="
 pip install --upgrade pip
 # Replace full tensorflow with CPU-only build to avoid GPU/TPU driver conflicts with torch-xla
 pip install tensorflow-cpu --quiet 2>/dev/null || true
-pip install -r requirements.txt
+pip install -c constraints.txt -r requirements.txt
 
 echo "=== Compiling KenLM ==="
 # Trigger our automated compilation utility
