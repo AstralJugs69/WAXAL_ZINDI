@@ -22,7 +22,7 @@ if not hasattr(np_dtypes, "StringDType"):
     np_dtypes.StringDType = MockStringDType
     np.dtypes.StringDType = MockStringDType
 
-import evaluate
+import jiwer
 from datasets import Dataset
 from transformers import (
     Seq2SeqTrainer, 
@@ -53,10 +53,6 @@ except ImportError:
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("trainer")
-
-# Metrics
-wer_metric = evaluate.load("wer")
-cer_metric = evaluate.load("cer")
 
 def get_compute_metrics_fn(processor, is_seq2seq):
     """
@@ -95,8 +91,8 @@ def get_compute_metrics_fn(processor, is_seq2seq):
         if not valid_labels:
             return {"wer": 1.0, "cer": 1.0, "final_score": 1.0}
             
-        wer = wer_metric.compute(predictions=valid_preds, references=valid_labels)
-        cer = cer_metric.compute(predictions=valid_preds, references=valid_labels)
+        wer = jiwer.wer(reference=valid_labels, hypothesis=valid_preds)
+        cer = jiwer.cer(reference=valid_labels, hypothesis=valid_preds)
         final_score = 0.5 * wer + 0.5 * cer
         
         return {"wer": wer, "cer": cer, "final_score": final_score}

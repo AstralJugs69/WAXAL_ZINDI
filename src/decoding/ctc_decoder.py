@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-import evaluate
+import jiwer
 from pyctcdecode import build_ctcdecoder
 from src.data.dataset import normalize_text
 
@@ -66,9 +66,6 @@ def tune_decoder_hyperparameters(
     """
     logger.info("Starting hyperparameter tuning for pyctcdecode alpha and beta...")
     
-    wer_metric = evaluate.load("wer")
-    cer_metric = evaluate.load("cer")
-    
     def objective(trial):
         alpha = trial.suggest_float("alpha", 0.0, 3.0)
         beta = trial.suggest_float("beta", 0.0, 5.0)
@@ -99,8 +96,8 @@ def tune_decoder_hyperparameters(
         if not valid_refs:
             return 1.0
             
-        wer = wer_metric.compute(predictions=valid_preds, references=valid_refs)
-        cer = cer_metric.compute(predictions=valid_preds, references=valid_refs)
+        wer = jiwer.wer(reference=valid_refs, hypothesis=valid_preds)
+        cer = jiwer.cer(reference=valid_refs, hypothesis=valid_preds)
         score = 0.5 * wer + 0.5 * cer
         return score
         
