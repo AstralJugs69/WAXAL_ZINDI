@@ -195,6 +195,43 @@ def parse_robust_csv(csv_path):
     logger.info(f"Successfully parsed {len(df)} rows from {csv_path}")
     return df
 
+def load_waxal_dataset_clean(lang):
+    """
+    Loads only train and validation parquet files directly from Hugging Face Hub
+    for the specified language. This completely bypasses the 40+ unlabeled files,
+    preventing RAM OOMs and massive disk/network waste.
+    """
+    from huggingface_hub import list_repo_files
+    from datasets import load_dataset, Audio
+    
+    repo_id = "google/WaxalNLP"
+    logger.info(f"Retrieving file list for {repo_id} to load {lang} dataset...")
+    
+    try:
+        all_files = list_repo_files(repo_id, repo_type="dataset")
+    except Exception as e:
+        logger.error(f"Failed to list files from Hugging Face: {e}")
+        raise e
+        
+    lang_dir = f"data/ASR/{lang}"
+    train_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-train-" in f and f.endswith(".parquet")]
+    val_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-validation-" in f and f.endswith(".parquet")]
+    
+    if not train_patterns or not val_patterns:
+        raise ValueError(f"Could not find train/validation parquet files for language {lang} in {repo_id}")
+        
+    train_urls = [f"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}" for f in train_patterns]
+    val_urls = [f"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}" for f in val_patterns]
+    
+    logger.info(f"Loading {len(train_urls)} train files and {len(val_urls)} validation files directly...")
+    
+    ds = load_dataset("parquet", data_files={"train": train_urls, "validation": val_urls})
+    
+    # Cast audio column to Audio feature
+    ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+    return ds
+
+
 def get_speaker_metadata(languages=["lin", "sna", "lug"]):
     """
     Loads google/WaxalNLP metadata from Hugging Face for specified configs
@@ -205,14 +242,14 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
     id_to_meta = {}
 
     for lang in languages:
-        config_name = f"{lang}_asr"
         lang_count = 0
-        for split_name in ["train", "validation"]:
-            try:
-                # Load one split at a time
-                split_ds = load_dataset("google/WaxalNLP", config_name, split=split_name)
+        try:
+            ds = load_waxal_dataset_clean(lang)
+            for split_name in ["train", "validation"]:
+                if split_name not in ds:
+                    continue
                 # Drop the audio column immediately to prevent loading raw bytes into RAM
-                split_ds = split_ds.remove_columns(["audio"])
+                split_ds = ds[split_name].remove_columns(["audio"])
                 for example in split_ds:
                     ex_id = example.get("id") or example.get("client_id")
                     if ex_id:
@@ -220,12 +257,13 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
                             "speaker_id": example.get("speaker_id") or example.get("client_id") or "unknown_speaker"
                         }
                         lang_count += 1
-            except Exception as e:
-                logger.warning(f"Could not load split '{split_name}' for {config_name}: {e}")
+        except Exception as e:
+            logger.warning(f"Could not load clean dataset for language {lang} metadata mapping: {e}")
 
         logger.info(f"Loaded {lang_count} metadata entries for language '{lang}'")
 
     return id_to_meta
+
 
 
 def prepare_datasets(train_csv_path, test_csv_path, languages=["lin", "sna", "lug"], k_folds=5):

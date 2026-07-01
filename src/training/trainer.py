@@ -140,11 +140,11 @@ def run_training(args, config, is_tpu=False, index=0):
         logger.info(f"Train split size: {len(train_split_df)} || Val split size: {len(val_split_df)}")
     
     # Lazily construct HF datasets using select to avoid copying raw audio bytes to RAM
-    from datasets import load_dataset, concatenate_datasets
-    config_name = f"{args.target_lang}_asr"
+    from datasets import concatenate_datasets
+    from src.data.dataset import load_waxal_dataset_clean
     if (not is_tpu) or (index == 0):
-        logger.info(f"Loading HF dataset '{config_name}' lazily...")
-    full_ds = load_dataset("google/WaxalNLP", config_name)
+        logger.info(f"Loading HF dataset for language '{args.target_lang}' cleanly...")
+    full_ds = load_waxal_dataset_clean(args.target_lang)
     
     def build_lazy_dataset(split_df):
         id_to_label = dict(zip(split_df["id"], split_df["normalized_transcription"]))
