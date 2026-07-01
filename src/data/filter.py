@@ -35,13 +35,9 @@ def filter_dataset(dataset_df, duration_min=1.5, duration_max=30.0, wps_min=1.0,
 
     # Check if audio data is actually decoded — if not, skip filter to avoid producing empty dataset.
     sample_audio = dataset_df["audio"].iloc[0] if len(dataset_df) > 0 else None
-    audio_is_decoded = (
-        sample_audio is not None
-        and isinstance(sample_audio, dict)
-        and "array" in sample_audio
-        and sample_audio["array"] is not None
-    )
-    if not audio_is_decoded:
+    from src.data.dataset import get_audio_data
+    array, sr = get_audio_data(sample_audio)
+    if array is None or sr is None:
         logger.warning(
             "Audio arrays not yet decoded in dataset — skipping duration/WPS filter. "
             "Filtering will run after audio is loaded by the feature pipeline."
@@ -53,11 +49,9 @@ def filter_dataset(dataset_df, duration_min=1.5, duration_max=30.0, wps_min=1.0,
         audio_info = row.get("audio")
         transcript = row.get("normalized_transcription", "")
 
-        if not audio_info or "array" not in audio_info or "sampling_rate" not in audio_info:
+        array, sr = get_audio_data(audio_info)
+        if array is None or sr is None:
             continue
-
-        array = audio_info["array"]
-        sr = audio_info["sampling_rate"]
 
         # 1. Compute duration and filter
         duration = compute_audio_duration(array, sr)
