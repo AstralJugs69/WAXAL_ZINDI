@@ -64,6 +64,19 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("trainer")
 
+# Print CUDA Diagnostics on GPU to debug hardware compatibility
+if torch.cuda.is_available():
+    logger.info(f"=== GPU CUDA Diagnostics ===")
+    logger.info(f"PyTorch Version: {torch.__version__}")
+    logger.info(f"PyTorch CUDA Version: {torch.version.cuda}")
+    try:
+        logger.info(f"PyTorch Compiled Architectures: {torch.cuda.get_arch_list()}")
+    except Exception as e:
+        logger.info(f"Could not retrieve architecture list: {e}")
+    logger.info(f"Device Name: {torch.cuda.get_device_name(0)}")
+    logger.info(f"Device Capability: {torch.cuda.get_device_capability(0)}")
+    logger.info(f"=============================")
+
 def get_compute_metrics_fn(processor, is_seq2seq):
     """
     Returns the metric computation function for evaluation.
