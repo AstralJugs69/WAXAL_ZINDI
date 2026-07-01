@@ -6,9 +6,9 @@ languages:
 
 training:
   learning_rate: 1.0e-4
-  per_device_train_batch_size: 8       # Up from 4 — better GPU utilization, fewer kernel launches
-  per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 2       # 2 GPUs × 8 batch × 2 accum = 32 effective batch (same as before)
+  per_device_train_batch_size: 4       # Reduced to 4 to prevent CUDA OOM on 16GB T4 GPUs
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4       # 2 GPUs × 4 batch × 4 accum = 32 effective batch size
   num_train_epochs: 30
   fp16: true
   gradient_checkpointing: true
