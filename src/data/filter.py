@@ -28,6 +28,11 @@ def filter_dataset(dataset_df, duration_min=1.5, duration_max=30.0, wps_min=1.0,
     logger.info(f"Filtering dataset with constraints: duration [{duration_min}s, {duration_max}s], WPS [{wps_min}, {wps_max}]")
     initial_count = len(dataset_df)
 
+    # If audio column is not in pandas DataFrame (e.g. because we are lazy loading), skip filtering here.
+    if "audio" not in dataset_df.columns:
+        logger.warning("Audio column not present in DataFrame — skipping duration/WPS filter at this stage.")
+        return dataset_df
+
     # Check if audio data is actually decoded — if not, skip filter to avoid producing empty dataset.
     sample_audio = dataset_df["audio"].iloc[0] if len(dataset_df) > 0 else None
     audio_is_decoded = (
