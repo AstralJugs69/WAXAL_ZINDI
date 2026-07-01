@@ -161,32 +161,35 @@ def run_training(args, config, is_tpu=False, index=0):
     
     def build_lazy_dataset(split_df):
         id_to_label = dict(zip(split_df["id"], split_df["normalized_transcription"]))
+        id_set = set(id_to_label.keys())
         selected_ds_list = []
-        ordered_labels = []
         
         for split_name in ["train", "validation"]:
             if split_name not in full_ds:
                 continue
             split_ds = full_ds[split_name]
-            # remove_columns prevents Arrow from processing the audio column during metadata scans
-            split_ds_meta = split_ds.remove_columns(["audio"])
-            
-            split_indices = []
-            for idx, example in enumerate(split_ds_meta):
-                ex_id = example.get("id") or example.get("client_id")
-                if ex_id in id_to_label:
-                    split_indices.append(idx)
-                    ordered_labels.append(id_to_label[ex_id])
-                    
-            if split_indices:
-                selected_ds = split_ds.select(split_indices)
-                selected_ds_list.append(selected_ds)
+            # Vectorized filter — runs in Arrow/C++, much faster than Python enumerate loop
+            split_ds_filtered = split_ds.filter(
+                lambda batch: [ex_id in id_set for ex_id in (batch.get("id") or batch.get("client_id"))],
+                batched=True,
+                batch_size=1000,
+                desc=f"Matching IDs in {split_name}"
+            )
+            if len(split_ds_filtered) > 0:
+                selected_ds_list.append(split_ds_filtered)
                 
         if not selected_ds_list:
             raise ValueError(f"No matching IDs found in HF dataset for the split.")
             
         concat_ds = concatenate_datasets(selected_ds_list)
-        concat_ds = concat_ds.add_column("normalized_transcription", ordered_labels)
+        
+        # Map labels by ID using a fast batched map
+        def add_labels(batch):
+            ids = batch.get("id") or batch.get("client_id")
+            batch["normalized_transcription"] = [id_to_label.get(ex_id, "") for ex_id in ids]
+            return batch
+        
+        concat_ds = concat_ds.map(add_labels, batched=True, batch_size=1000, desc="Attaching labels")
         return concat_ds
 
     train_dataset = build_lazy_dataset(train_split_df)
@@ -313,7 +316,9 @@ def run_training(args, config, is_tpu=False, index=0):
         "greater_is_better": False,
         "weight_decay": train_args["weight_decay"],
         "group_by_length": train_args.get("group_by_length", False),  # Disabled to prevent LengthGroupedSampler error when dynamic padding is used
-        "dataloader_num_workers": train_args.get("dataloader_num_workers", 0),
+        # On GPU, use 2 workers to prefetch and decode audio in background while GPU trains.
+        # On TPU, keep 0 to avoid Arrow file lock contention across processes.
+        "dataloader_num_workers": train_args.get("dataloader_num_workers", 0) if is_tpu else min(train_args.get("dataloader_num_workers", 2), 2),
         "remove_unused_columns": False,
         "report_to": ["none"]
     }
