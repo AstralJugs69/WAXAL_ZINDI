@@ -310,8 +310,25 @@ def main():
                 "torch_xla is not installed. To run on TPU, please install PyTorch/XLA: "
                 "pip install torch_xla"
             )
-        logger.info("Spawning distributed TPU multiprocessing (8 cores)...")
-        xmp.spawn(tpu_worker, args=(args, config), nprocs=None, start_method="fork")
+        # Pre-warm the HuggingFace dataset and model caches in the main process.
+        # With start_method="spawn", each of the 8 child processes starts fresh.
+        # Pre-warming ensures they load from disk cache (fast) instead of re-downloading.
+        logger.info("Pre-warming dataset and model caches before TPU spawn...")
+        data_config = config["data"]
+        from src.data.dataset import prepare_datasets
+        prepare_datasets(
+            train_csv_path=data_config["train_csv"],
+            test_csv_path=data_config["test_csv"],
+            languages=[args.target_lang],
+            k_folds=data_config["k_folds"]
+        )
+        from src.models.mms_model import load_processor_for_mms
+        load_processor_for_mms(model_id=config["model_id"], target_lang=args.target_lang)
+        logger.info("Cache pre-warming complete. Spawning 8 TPU worker processes...")
+
+        # start_method="spawn" is required for PJRT — "fork" causes SIGTERM crashes
+        # because forked processes inherit the parent's TPU device file descriptors.
+        xmp.spawn(tpu_worker, args=(args, config), nprocs=None, start_method="spawn")
     else:
         run_training(args, config, is_tpu=False, index=0)
 
