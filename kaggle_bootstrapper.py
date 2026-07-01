@@ -97,6 +97,27 @@ def main():
             "torch==2.8.0", "torch_xla[tpu]==2.8.0", 
             "-f", "https://storage.googleapis.com/libtpu-releases/index.html"
         ])
+        
+    # Detect if we are on a Tesla P100 GPU and need to install sm_60 (Pascal) compatible PyTorch wheels
+    p100_detected = False
+    if not tpu_active:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name(0).lower()
+                if "p100" in device_name:
+                    p100_detected = True
+        except Exception:
+            pass
+
+    if p100_detected:
+        print("\n=== Tesla P100 GPU Detected ===")
+        print("Installing sm_60 (Pascal) compatible PyTorch, Torchaudio, and Torchvision wheels...")
+        run_command_live([
+            "pip", "install", "--force-reinstall",
+            "torch", "torchaudio", "torchvision",
+            "--index-url", "https://download.pytorch.org/whl/cu118"
+        ])
 
     print("\n=== Step 3: Installing Dependencies & Compiling KenLM ===")
     run_command_live(["bash", "scripts/install_dependencies.sh"])
