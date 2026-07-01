@@ -28,7 +28,7 @@ if command -v nvidia-smi &> /dev/null; then
     if [[ "$GPU_NAME" == *"P100"* ]]; then
         echo "Tesla P100 GPU detected. Reinstalling sm_60 (Pascal) compatible PyTorch, Torchaudio, and Torchvision wheels..."
         pip install --force-reinstall \
-            torch torchaudio torchvision \
+            torch torchaudio torchvision "numpy<2" \
             --index-url https://download.pytorch.org/whl/cu118
     else
         echo "GPU detected: $GPU_NAME (compatibility check passed)"
