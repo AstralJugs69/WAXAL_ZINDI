@@ -23,7 +23,7 @@ training:
   greater_is_better: false
   weight_decay: 0.01
   group_by_length: false                # Disabled to avoid LengthGroupedSampler error
-  dataloader_num_workers: 2            # Parallel CPU data loading to keep GPU fed
+  dataloader_num_workers: 0            # Set to 0 to prevent CPU throttling on 2-core Kaggle environments
 
 data:
   train_csv: "Train.csv"

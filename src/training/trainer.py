@@ -182,6 +182,9 @@ def run_training(args, config, is_tpu=False, index=0):
         device = torch_xla.device()
     else:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda":
+            import torch.backends.cudnn as cudnn
+            cudnn.benchmark = True
         
     if (not is_tpu) or (index == 0):
         logger.info(f"Target device resolved: {device}")
@@ -210,9 +213,34 @@ def run_training(args, config, is_tpu=False, index=0):
         )
         model = model.to(device)
         
-    # Ensure all targets are mapped
+    # Ensure all targets are mapped and audio is decoded at 16kHz
     train_dataset = train_dataset.cast_column("audio", Audio(sampling_rate=16000))
     val_dataset = val_dataset.cast_column("audio", Audio(sampling_rate=16000))
+    
+    # Filter dataset by duration and speaking rate (WPS) directly on the HF Dataset
+    if (not is_tpu) or (index == 0):
+        logger.info(f"Applying duration [{data_config['duration_min']}s, {data_config['duration_max']}s] and WPS [{data_config['wps_min']}, {data_config['wps_max']}] filters to HF datasets...")
+        
+    def hf_filter_fn(example):
+        audio_info = example["audio"]
+        if not audio_info or audio_info.get("array") is None:
+            return False
+        duration = len(audio_info["array"]) / audio_info["sampling_rate"]
+        if duration < data_config["duration_min"] or duration > data_config["duration_max"]:
+            return False
+        transcript = example.get("normalized_transcription") or example.get("transcription") or ""
+        word_count = len(transcript.split())
+        if duration > 0:
+            wps = word_count / duration
+            if wps < data_config["wps_min"] or wps > data_config["wps_max"]:
+                return False
+        return True
+
+    train_dataset = train_dataset.filter(hf_filter_fn, desc="Filtering train dataset by duration/WPS")
+    val_dataset = val_dataset.filter(hf_filter_fn, desc="Filtering val dataset by duration/WPS")
+    
+    if (not is_tpu) or (index == 0):
+        logger.info(f"After duration/WPS filter — Train dataset: {len(train_dataset)} || Val dataset: {len(val_dataset)}")
     
     # JIT warm-up dummy step for TPU to pre-populate compilation cache
     if is_tpu and index == 0:
@@ -266,7 +294,7 @@ def run_training(args, config, is_tpu=False, index=0):
         "greater_is_better": False,
         "weight_decay": train_args["weight_decay"],
         "group_by_length": train_args.get("group_by_length", False),  # Disabled to prevent LengthGroupedSampler error when dynamic padding is used
-        "dataloader_num_workers": train_args.get("dataloader_num_workers", 2),
+        "dataloader_num_workers": train_args.get("dataloader_num_workers", 0),
         "remove_unused_columns": False,
         "report_to": ["none"]
     }
