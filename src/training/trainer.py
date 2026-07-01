@@ -227,14 +227,14 @@ def run_training(args, config, is_tpu=False, index=0):
     training_kwargs = {
         "output_dir": output_dir,
         "per_device_train_batch_size": train_args["per_device_train_batch_size"],
+        "per_device_eval_batch_size": train_args.get("per_device_eval_batch_size", 4),
         "gradient_accumulation_steps": train_args["gradient_accumulation_steps"],
         "learning_rate": float(train_args["learning_rate"]),
         "warmup_steps": train_args["warmup_steps"],
         "num_train_epochs": train_args["num_train_epochs"],
-        # gradient_checkpointing is now set below with TPU guard
         "fp16": train_args["fp16"] and not is_tpu and torch.cuda.is_available(),
         "bf16": is_tpu,  # Hardware-accelerated bfloat16 on TPU
-        "gradient_checkpointing": train_args["gradient_checkpointing"] and not is_tpu,  # Incompatible with TPU XLA
+        "gradient_checkpointing": train_args["gradient_checkpointing"] and not is_tpu,
         "eval_strategy": train_args["evaluation_strategy"],
         "eval_steps": train_args["eval_steps"],
         "save_steps": train_args["save_steps"],
@@ -244,6 +244,9 @@ def run_training(args, config, is_tpu=False, index=0):
         "metric_for_best_model": "final_score" if is_seq2seq else train_args["metric_for_best_model"],
         "greater_is_better": False,
         "weight_decay": train_args["weight_decay"],
+        # GPU memory optimizations
+        "group_by_length": train_args.get("group_by_length", True),  # Batch similar-length samples → less padding waste
+        "dataloader_num_workers": train_args.get("dataloader_num_workers", 2),
         "remove_unused_columns": False,
         "report_to": ["none"]
     }
@@ -270,6 +273,9 @@ def run_training(args, config, is_tpu=False, index=0):
     # 7. Start training
     if (not is_tpu) or (index == 0):
         logger.info("Starting model training...")
+    # Flush GPU memory before starting the training loop
+    if not is_tpu and torch.cuda.is_available():
+        torch.cuda.empty_cache()
     trainer.train()
     
     # Save the best model

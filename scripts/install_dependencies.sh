@@ -23,6 +23,8 @@ fi
 
 echo "=== Installing Python Requirements ==="
 pip install --upgrade pip
+# Replace full tensorflow with CPU-only build to avoid GPU/TPU driver conflicts with torch-xla
+pip install tensorflow-cpu --quiet 2>/dev/null || true
 pip install -r requirements.txt
 
 echo "=== Compiling KenLM ==="

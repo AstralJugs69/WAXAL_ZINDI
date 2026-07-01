@@ -64,11 +64,10 @@ def main():
                 for f in files[:10]:
                     print(f"{'  ' * (depth + 1)}[FILE] {f}")
                     
-    # Detect if TPU environment is active
+    # TPU training is disabled — driver conflicts with TF/XLA on Kaggle cause OOM crashes.
+    # GPU (P100/T4) is the primary training target with memory-optimized batch sizes.
     tpu_active = False
-    if os.environ.get("TPU_NAME") or os.environ.get("TPU_ACCELERATOR_TYPE") or os.path.exists("/usr/share/tpu-support"):
-        tpu_active = True
-    print(f"\n=== TPU Accelerator Detected: {tpu_active} ===")
+    print(f"\n=== Accelerator: GPU (TPU disabled) ===")
     
     if tpu_active:
         print("Installing PyTorch/XLA 2.8.0 wheels for TPU VMs (Python 3.12)...")
@@ -82,10 +81,9 @@ def main():
     run_command_live(["bash", "scripts/install_dependencies.sh"])
 
     print("\n=== Step 4: Kickstarting Model Training Pipeline ===")
-    # Starts fine-tuning the MMS-300M model on Lingala for fold 0
-    # Arguments: [config_path] [fold_index] [target_language] [tpu_flag]
-    tpu_flag = "--tpu" if tpu_active else ""
-    run_command_live(["bash", "scripts/run_training.sh", "config/base_mms.yaml", "0", "lin", tpu_flag])
+    # GPU training — no --tpu flag. Batch size and grad accumulation are
+    # tuned in config/base_mms.yaml to avoid OOM on 16GB VRAM GPUs.
+    run_command_live(["bash", "scripts/run_training.sh", "config/base_mms.yaml", "0", "lin"])
 
     print("\n=== Bootstrapping and Training Pipeline Completed Successfully ===")
 
