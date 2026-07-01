@@ -25,13 +25,32 @@ def get_audio_data(audio_info):
             # If the data is a PyTorch tensor, convert it to a NumPy array
             if hasattr(array, "numpy"):
                 array = array.numpy()
+            
+            # Ensure it is a 1D mono array (channels, frames) -> (frames,)
+            if array.ndim > 1:
+                if array.shape[0] < array.shape[-1]:
+                    array = array[0]  # Select first channel
+                else:
+                    array = array[:, 0]
+            array = array.flatten()
             return array, samples.sample_rate
         except Exception as e:
             logger.warning(f"Error decoding via AudioDecoder.get_all_samples: {e}")
             
     # Case 2: Standard dictionary representation
     if isinstance(audio_info, dict):
-        return audio_info.get("array"), audio_info.get("sampling_rate")
+        array = audio_info.get("array")
+        sr = audio_info.get("sampling_rate")
+        if array is not None:
+            import numpy as np
+            array = np.array(array)
+            if array.ndim > 1:
+                if array.shape[0] < array.shape[-1]:
+                    array = array[0]
+                else:
+                    array = array[:, 0]
+            array = array.flatten()
+        return array, sr
         
     # Case 3: Duck typing for objects with attributes
     if hasattr(audio_info, "array") and hasattr(audio_info, "sampling_rate"):
