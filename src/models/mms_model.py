@@ -32,7 +32,10 @@ def load_processor_for_mms(model_id: str = "facebook/mms-300m", target_lang: str
     """
     Loads the Wav2Vec2 processor and sets the target language on the tokenizer.
     """
-    logger.info(f"Loading Wav2Vec2 processor for {model_id} with language {target_lang}")
-    processor = Wav2Vec2Processor.from_pretrained(model_id, target_lang=target_lang)
+    # Use "facebook/mms-1b-all" for processor configuration to get vocabulary files
+    # since base "mms-300m" does not contain ASR vocabulary configs.
+    processor_model_id = "facebook/mms-1b-all" if "mms-300m" in model_id else model_id
+    logger.info(f"Loading Wav2Vec2 processor for {processor_model_id} with language {target_lang}")
+    processor = Wav2Vec2Processor.from_pretrained(processor_model_id, target_lang=target_lang)
     processor.tokenizer.set_target_lang(target_lang)
     return processor
