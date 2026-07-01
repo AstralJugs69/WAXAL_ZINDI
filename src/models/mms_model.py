@@ -33,6 +33,6 @@ def load_processor_for_mms(model_id: str = "facebook/mms-300m", target_lang: str
     Loads the Wav2Vec2 processor and sets the target language on the tokenizer.
     """
     logger.info(f"Loading Wav2Vec2 processor for {model_id} with language {target_lang}")
-    processor = Wav2Vec2Processor.from_pretrained(model_id)
+    processor = Wav2Vec2Processor.from_pretrained(model_id, target_lang=target_lang)
     processor.tokenizer.set_target_lang(target_lang)
     return processor
