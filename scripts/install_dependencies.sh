@@ -30,6 +30,8 @@ if command -v nvidia-smi &> /dev/null; then
         pip install --force-reinstall \
             torch torchaudio torchvision "numpy<2" \
             --index-url https://download.pytorch.org/whl/cu118
+        echo "Uninstalling torchcodec to prevent compatibility crashes with cu118..."
+        pip uninstall -y torchcodec
     else
         echo "GPU detected: $GPU_NAME (compatibility check passed)"
     fi
