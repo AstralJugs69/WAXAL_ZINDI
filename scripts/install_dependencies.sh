@@ -21,6 +21,18 @@ else
     echo "Warning: Non-debian system detected. Please install ffmpeg, cmake, build-essential, libsndfile, boost, zlib, bz2, and lzma manually."
 fi
 
+echo "=== Checking GPU Architecture ==="
+if command -v nvidia-smi &> /dev/null; then
+    if nvidia-smi | grep -q "P100"; then
+        echo "Tesla P100 GPU detected. Reinstalling sm_60 (Pascal) compatible PyTorch, Torchaudio, and Torchvision wheels..."
+        pip install --force-reinstall \
+            torch torchaudio torchvision \
+            --index-url https://download.pytorch.org/whl/cu118
+    else
+        echo "GPU detected: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
+    fi
+fi
+
 echo "=== Generating PyTorch Version Constraints ==="
 # Pin current torch, torchaudio, torchvision, and numpy versions to prevent pip from overwriting them with incompatible PyPI wheels
 pip freeze | grep -E "^(torch|torchaudio|torchvision|numpy|intel-openmp|mkl)==" > constraints.txt
