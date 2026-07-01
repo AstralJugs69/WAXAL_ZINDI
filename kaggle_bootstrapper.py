@@ -35,22 +35,36 @@ def main():
     working_dir = "/kaggle/working"
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
-    print("=== Step 1: Retrieving Codebase ===")
-    os.chdir(working_dir)
-    
-    if os.path.exists(project_dir):
-        print("Found existing project directory. Resetting and pulling latest changes...")
+    print("=== Step 0: Wiping Disk Cache & Freeing Space ===")
+    # Clear HuggingFace dataset caches (where the massive duplicate caches accumulate)
+    hf_cache_dir = os.path.expanduser("~/.cache/huggingface/datasets")
+    if os.path.exists(hf_cache_dir):
+        print(f"Removing HF dataset cache at: {hf_cache_dir}")
         try:
-            # Reset local commits to fetch latest changes without conflicts
-            run_command_live(["git", "reset", "--hard"], cwd=project_dir)
-            run_command_live(["git", "pull"], cwd=project_dir)
+            shutil.rmtree(hf_cache_dir)
+            print("HF dataset cache cleared successfully.")
         except Exception as e:
-            print(f"Git pull/reset failed: {e}. Re-cloning fresh...")
+            print(f"Warning: Failed to clear HF cache: {e}")
+            
+    # Clear old project directory to ensure fresh clone
+    if os.path.exists(project_dir):
+        print(f"Removing old project directory at: {project_dir}")
+        try:
             shutil.rmtree(project_dir)
-            run_command_live(["git", "clone", repo_url, project_dir])
-    else:
-        run_command_live(["git", "clone", repo_url, project_dir])
-        
+            print("Project directory cleared successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to clear project directory: {e}")
+            
+    # Report available disk space
+    try:
+        total, used, free = shutil.disk_usage(working_dir)
+        print(f"Disk Space Telemetry | Used: {used/(1024**3):.1f}GB | Free: {free/(1024**3):.1f}GB | Total: {total/(1024**3):.1f}GB")
+    except Exception:
+        pass
+
+    print("\n=== Step 1: Retrieving Codebase ===")
+    os.chdir(working_dir)
+    run_command_live(["git", "clone", repo_url, project_dir])
     os.chdir(project_dir)
     print(f"Current working directory set to: {os.getcwd()}")
 
