@@ -137,13 +137,28 @@ def run_training(args, config, is_tpu=False, index=0):
     if (not is_tpu) or (index == 0):
         logger.info(f"Train split size: {len(train_split_df)} || Val split size: {len(val_split_df)}")
     
+    # Drop rows with no audio mapping (HF metadata lookup failed for those IDs).
+    # These rows cannot be trained on since there is no waveform to load.
+    train_split_df = train_split_df[train_split_df["audio"].notna()].reset_index(drop=True)
+    val_split_df = val_split_df[val_split_df["audio"].notna()].reset_index(drop=True)
+
+    if (not is_tpu) or (index == 0):
+        logger.info(f"After audio-null drop — Train: {len(train_split_df)} || Val: {len(val_split_df)}")
+
+    if len(train_split_df) == 0:
+        raise ValueError(
+            f"Training split is empty after filtering for language '{args.target_lang}', fold {args.fold}. "
+            "This likely means the HF audio metadata lookup failed for all rows. "
+            "Check that 'google/WaxalNLP' is reachable and IDs in Train.csv match HF dataset IDs."
+        )
+
     # Convert to Hugging Face Dataset
     train_dataset = Dataset.from_pandas(train_split_df)
     val_dataset = Dataset.from_pandas(val_split_df)
     
     # 2. Setup device configuration
     if is_tpu:
-        device = xm.xla_device()
+        device = torch_xla.device()
     else:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
@@ -188,7 +203,7 @@ def run_training(args, config, is_tpu=False, index=0):
                     model.model.encoder(dummy_input)
                 else:
                     model(dummy_input)
-            xm.mark_step()
+            torch_xla.sync()
             logger.info("JIT warm-up completed successfully.")
         except Exception as e:
             logger.warning(f"JIT warm-up skipped: {e}")
