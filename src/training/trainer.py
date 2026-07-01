@@ -287,7 +287,7 @@ def main():
                 "pip install torch_xla"
             )
         logger.info("Spawning distributed TPU multiprocessing (8 cores)...")
-        xmp.spawn(tpu_worker, args=(args, config), nprocs=8, start_method="fork")
+        xmp.spawn(tpu_worker, args=(args, config), nprocs=None, start_method="fork")
     else:
         run_training(args, config, is_tpu=False, index=0)
 
