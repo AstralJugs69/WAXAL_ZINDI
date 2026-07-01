@@ -22,7 +22,8 @@ def get_mms_model_with_adapter(
     model_id: str = "facebook/mms-300m",
     target_lang: str = "lin",
     freeze_feature_extractor: bool = True,
-    processor: Wav2Vec2Processor = None
+    processor: Wav2Vec2Processor = None,
+    torch_dtype = None
 ):
     """
     Loads facebook/mms-300m for CTC fine-tuning on a target language.
@@ -42,7 +43,8 @@ def get_mms_model_with_adapter(
     model = Wav2Vec2ForCTC.from_pretrained(
         model_id,
         ignore_mismatched_sizes=True,
-        vocab_size=vocab_size  # Resize LM head to match target language vocab
+        vocab_size=vocab_size,  # Resize LM head to match target language vocab
+        torch_dtype=torch_dtype
     )
 
     # Freeze Wav2Vec2 feature encoder for CTC stability in low-resource setups

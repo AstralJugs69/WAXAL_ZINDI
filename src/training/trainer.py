@@ -1,5 +1,7 @@
 import os
 os.environ["JAX_PLATFORMS"] = "cpu"  # Prevent JAX from locking TPU device on import
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # Prevent XLA client memory pre-allocation
+
 
 # Remove Kaggle environment variables that interfere with PJRT single-host auto-detection
 for env_var in ["TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID"]:
@@ -205,11 +207,13 @@ def run_training(args, config, is_tpu=False, index=0):
         )
     else:
         processor = load_processor_for_mms(model_id=model_id, target_lang=args.target_lang)
+        model_dtype = torch.bfloat16 if is_tpu else (torch.float16 if torch.cuda.is_available() else torch.float32)
         model = get_mms_model_with_adapter(
             model_id=model_id,
             target_lang=args.target_lang,
             freeze_feature_extractor=True,
-            processor=processor
+            processor=processor,
+            torch_dtype=model_dtype
         )
         model = model.to(device)
         
@@ -380,6 +384,12 @@ def main():
         )
         from src.models.mms_model import load_processor_for_mms
         load_processor_for_mms(model_id=config["model_id"], target_lang=args.target_lang)
+        
+        # Pre-download the model checkpoint to disk cache so workers don't fight for locks
+        from transformers import Wav2Vec2ForCTC
+        logger.info(f"Pre-downloading model weights for {config['model_id']} to disk cache...")
+        Wav2Vec2ForCTC.from_pretrained(config["model_id"])
+        
         logger.info("Cache pre-warming complete. Spawning 8 TPU worker processes...")
 
         # start_method="spawn" is required for PJRT — "fork" causes SIGTERM crashes
