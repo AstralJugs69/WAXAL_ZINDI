@@ -169,7 +169,8 @@ def run_training(args, config, is_tpu=False, index=0):
         model = get_mms_model_with_adapter(
             model_id=model_id,
             target_lang=args.target_lang,
-            freeze_feature_extractor=True
+            freeze_feature_extractor=True,
+            processor=processor
         )
         model = model.to(device)
         
