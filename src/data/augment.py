@@ -110,10 +110,10 @@ class DynamicAugmentator:
             factor = random.uniform(*self.speed_range)
             y = speed_perturb(y, factor)
             
-        # 2. Pitch modification (30% probability)
-        if random.random() < 0.3:
-            factor = random.uniform(*self.pitch_range)
-            y = pitch_perturb(y, sr, factor)
+        # 2. Pitch modification (disabled due to librosa CPU overhead)
+        # if random.random() < 0.3:
+        #     factor = random.uniform(*self.pitch_range)
+        #     y = pitch_perturb(y, sr, factor)
             
         # 3. Time drop-out chunks (30% probability)
         if random.random() < 0.3:
@@ -190,8 +190,10 @@ class ASRDataCollatorWithPadding:
                 y = librosa.resample(y, orig_sr=sr, target_sr=self.sampling_rate)
                 sr = self.sampling_rate
                 
-            # Apply dynamic augmentations if training
-            if self.augmentator is not None:
+            # Apply dynamic augmentations only during training (when grad is enabled)
+            if self.augmentator is not None and torch.is_grad_enabled():
+                # Avoid pitch perturbation as librosa pitch shifting is extremely slow on CPU
+                # We still keep speed, time drop, and noise overlay
                 y = self.augmentator(y, sr)
                 
             # Pad to the resolved static bucket size
