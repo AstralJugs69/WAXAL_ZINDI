@@ -117,6 +117,15 @@ def run_training(args, config, is_tpu=False, index=0):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     is_main_process = (local_rank == 0) and ((not is_tpu) or (index == 0))
     
+    # Silence Hugging Face Datasets logging and progress bars on non-main ranks to avoid duplicate output
+    import datasets
+    if not is_main_process:
+        datasets.utils.logging.set_verbosity_error()
+        datasets.utils.logging.disable_progress_bar()
+    else:
+        # Keep master rank clean but visible
+        datasets.utils.logging.set_verbosity_warning()
+    
     # 1. Prepare datasets
     data_config = config["data"]
     train_df, _ = prepare_datasets(
