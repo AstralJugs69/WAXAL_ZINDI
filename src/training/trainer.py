@@ -29,7 +29,7 @@ if not hasattr(np_dtypes, "StringDType"):
     np.dtypes.StringDType = MockStringDType
 
 import jiwer
-from datasets import Dataset
+from datasets import Dataset, Audio
 from transformers import (
     Seq2SeqTrainer, 
     Seq2SeqTrainingArguments, 
@@ -175,8 +175,8 @@ def run_training(args, config, is_tpu=False, index=0):
         model = model.to(device)
         
     # Ensure all targets are mapped
-    train_dataset = train_dataset.cast_column("audio", Dataset.Audio(sampling_rate=16000))
-    val_dataset = val_dataset.cast_column("audio", Dataset.Audio(sampling_rate=16000))
+    train_dataset = train_dataset.cast_column("audio", Audio(sampling_rate=16000))
+    val_dataset = val_dataset.cast_column("audio", Audio(sampling_rate=16000))
     
     # JIT warm-up dummy step for TPU to pre-populate compilation cache
     if is_tpu and index == 0:
@@ -216,10 +216,11 @@ def run_training(args, config, is_tpu=False, index=0):
         "learning_rate": float(train_args["learning_rate"]),
         "warmup_steps": train_args["warmup_steps"],
         "num_train_epochs": train_args["num_train_epochs"],
-        "gradient_checkpointing": train_args["gradient_checkpointing"],
+        # gradient_checkpointing is now set below with TPU guard
         "fp16": train_args["fp16"] and not is_tpu and torch.cuda.is_available(),
-        "bf16": is_tpu, # Hardware-accelerated bfloat16 on TPU
-        "evaluation_strategy": train_args["evaluation_strategy"],
+        "bf16": is_tpu,  # Hardware-accelerated bfloat16 on TPU
+        "gradient_checkpointing": train_args["gradient_checkpointing"] and not is_tpu,  # Incompatible with TPU XLA
+        "eval_strategy": train_args["evaluation_strategy"],
         "eval_steps": train_args["eval_steps"],
         "save_steps": train_args["save_steps"],
         "logging_steps": train_args["logging_steps"],
@@ -247,7 +248,8 @@ def run_training(args, config, is_tpu=False, index=0):
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=data_collator,
-        compute_metrics=get_compute_metrics_fn(processor, is_seq2seq)
+        compute_metrics=get_compute_metrics_fn(processor, is_seq2seq),
+        processing_class=processor.feature_extractor  # Required for CTC padding
     )
     
     # 7. Start training

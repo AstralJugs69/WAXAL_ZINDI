@@ -47,7 +47,7 @@ def get_mms_model_with_adapter(
 
     # Freeze Wav2Vec2 feature encoder for CTC stability in low-resource setups
     if freeze_feature_extractor:
-        logger.info("Freezing the Wav2Vec2 feature extractor layers.")
-        model.freeze_feature_extractor()
+        logger.info("Freezing the Wav2Vec2 feature encoder layers.")
+        model.freeze_feature_encoder()
 
     return model
