@@ -1,6 +1,7 @@
 import os
 os.environ["JAX_PLATFORMS"] = "cpu"  # Prevent JAX from locking TPU device on import
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # Prevent XLA client memory pre-allocation
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # Prevent VRAM fragmentation OOMs on 16GB GPUs (P100/T4)
 
 
 # Remove Kaggle environment variables that interfere with PJRT single-host auto-detection
@@ -362,6 +363,24 @@ def run_training(args, config, is_tpu=False, index=0):
         "ddp_find_unused_parameters": True
     }
     
+    # Automatically adjust gradient_accumulation_steps on GPU to maintain a constant effective batch size of 32
+    if not is_tpu and torch.cuda.is_available():
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+        else:
+            world_size = 1
+        per_device_batch = training_kwargs["per_device_train_batch_size"]
+        target_effective_batch = 32
+        accum_steps = max(1, target_effective_batch // (per_device_batch * world_size))
+        training_kwargs["gradient_accumulation_steps"] = accum_steps
+        if is_main_process:
+            logger.info(
+                f"Dynamic Hyperparameter Alignment: Active GPUs={world_size} | "
+                f"Per-device Batch={per_device_batch} | "
+                f"Gradient Accumulation Steps={accum_steps} | "
+                f"Effective Batch Size={per_device_batch * world_size * accum_steps}"
+            )
+            
     if is_seq2seq:
         training_kwargs["predict_with_generate"] = True
         training_kwargs["generation_max_length"] = 225
