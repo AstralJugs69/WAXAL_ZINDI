@@ -32,6 +32,7 @@ if not hasattr(np_dtypes, "StringDType"):
     np.dtypes.StringDType = MockStringDType
 
 import jiwer
+import pandas as pd
 from datasets import Dataset, Audio
 from transformers import (
     Seq2SeqTrainer, 
