@@ -143,16 +143,9 @@ def parse_robust_csv(csv_path):
 def get_speaker_metadata(languages=["lin", "sna", "lug"]):
     """
     Loads google/WaxalNLP metadata from Hugging Face for specified configs
-    to map ID to speaker_id and audio path info.
-    Uses decode=False so audio is stored as raw bytes/path dict (no torchcodec needed).
-    Actual decoding happens later via cast_column("audio", Audio(sampling_rate=16000)).
-
-    IMPORTANT: Only loads 'train' and 'validation' splits by name.
-    Calling load_dataset without split= downloads ALL 40 parquet files (including 28
-    unlabeled ones with 70k+ examples), which OOMs the notebook RAM.
-    Specifying split= makes HF download only the 10 labeled parquet files.
+    to map ID to speaker_id.
+    Does NOT load the audio column to prevent downloading/reading any audio bytes into RAM.
     """
-    from datasets import Audio as HFAudio
     logger.info(f"Fetching speaker metadata from Hugging Face google/WaxalNLP for {languages}")
     id_to_meta = {}
 
@@ -161,15 +154,15 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
         lang_count = 0
         for split_name in ["train", "validation"]:
             try:
-                # Load one split at a time — HF only downloads parquet files for that split
+                # Load one split at a time
                 split_ds = load_dataset("google/WaxalNLP", config_name, split=split_name)
-                split_ds = split_ds.cast_column("audio", HFAudio(decode=False))
+                # Drop the audio column immediately to prevent loading raw bytes into RAM
+                split_ds = split_ds.remove_columns(["audio"])
                 for example in split_ds:
                     ex_id = example.get("id") or example.get("client_id")
                     if ex_id:
                         id_to_meta[ex_id] = {
-                            "speaker_id": example.get("speaker_id") or example.get("client_id") or "unknown_speaker",
-                            "audio": example.get("audio")  # {"path": ..., "bytes": ...} — decoded later
+                            "speaker_id": example.get("speaker_id") or example.get("client_id") or "unknown_speaker"
                         }
                         lang_count += 1
             except Exception as e:
@@ -194,25 +187,21 @@ def prepare_datasets(train_csv_path, test_csv_path, languages=["lin", "sna", "lu
     # Remove nulls or empty transcriptions after normalization
     train_df = train_df[train_df["normalized_transcription"].str.strip() != ""]
     
-    # 3. Retrieve Speaker IDs and Audios
+    # 3. Retrieve Speaker IDs
     hf_meta = get_speaker_metadata(languages)
     
-    # Assign speaker_id and audio object
+    # Assign speaker_id
     def map_meta(row, key):
         meta = hf_meta.get(row["id"])
         if meta:
             return meta.get(key)
         # Fallback speaker ID based on ID prefix if metadata fails
         if key == "speaker_id":
-            # Generate a speaker ID using the index or id hash to avoid crash
             return f"spk_{hash(row['id']) % 1000}"
         return None
         
     train_df["speaker_id"] = train_df.apply(lambda r: map_meta(r, "speaker_id"), axis=1)
-    train_df["audio"] = train_df.apply(lambda r: map_meta(r, "audio"), axis=1)
-    
     test_df["speaker_id"] = test_df.apply(lambda r: map_meta(r, "speaker_id"), axis=1)
-    test_df["audio"] = test_df.apply(lambda r: map_meta(r, "audio"), axis=1)
     
     # 4. GroupKFold Cross-Validation Splitting
     # We group strictly by speaker_id to ensure 0% speaker intersection between folds

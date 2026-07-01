@@ -131,30 +131,51 @@ def run_training(args, config, is_tpu=False, index=0):
     )
     
     # Get train and validation splits based on target fold
-    train_split_df = train_df[train_df["fold"] != args.fold]
-    val_split_df = train_df[train_df["fold"] == args.fold]
+    train_split_df = train_df[train_df["fold"] != args.fold].reset_index(drop=True)
+    val_split_df = train_df[train_df["fold"] == args.fold].reset_index(drop=True)
     
     if (not is_tpu) or (index == 0):
         logger.info(f"Train split size: {len(train_split_df)} || Val split size: {len(val_split_df)}")
     
-    # Drop rows with no audio mapping (HF metadata lookup failed for those IDs).
-    # These rows cannot be trained on since there is no waveform to load.
-    train_split_df = train_split_df[train_split_df["audio"].notna()].reset_index(drop=True)
-    val_split_df = val_split_df[val_split_df["audio"].notna()].reset_index(drop=True)
-
+    # Lazily construct HF datasets using select to avoid copying raw audio bytes to RAM
+    from datasets import load_dataset, concatenate_datasets
+    config_name = f"{args.target_lang}_asr"
     if (not is_tpu) or (index == 0):
-        logger.info(f"After audio-null drop — Train: {len(train_split_df)} || Val: {len(val_split_df)}")
+        logger.info(f"Loading HF dataset '{config_name}' lazily...")
+    full_ds = load_dataset("google/WaxalNLP", config_name)
+    
+    def build_lazy_dataset(split_df):
+        id_to_label = dict(zip(split_df["id"], split_df["normalized_transcription"]))
+        selected_ds_list = []
+        ordered_labels = []
+        
+        for split_name in ["train", "validation"]:
+            if split_name not in full_ds:
+                continue
+            split_ds = full_ds[split_name]
+            # remove_columns prevents Arrow from processing the audio column during metadata scans
+            split_ds_meta = split_ds.remove_columns(["audio"])
+            
+            split_indices = []
+            for idx, example in enumerate(split_ds_meta):
+                ex_id = example.get("id") or example.get("client_id")
+                if ex_id in id_to_label:
+                    split_indices.append(idx)
+                    ordered_labels.append(id_to_label[ex_id])
+                    
+            if split_indices:
+                selected_ds = split_ds.select(split_indices)
+                selected_ds_list.append(selected_ds)
+                
+        if not selected_ds_list:
+            raise ValueError(f"No matching IDs found in HF dataset for the split.")
+            
+        concat_ds = concatenate_datasets(selected_ds_list)
+        concat_ds = concat_ds.add_column("normalized_transcription", ordered_labels)
+        return concat_ds
 
-    if len(train_split_df) == 0:
-        raise ValueError(
-            f"Training split is empty after filtering for language '{args.target_lang}', fold {args.fold}. "
-            "This likely means the HF audio metadata lookup failed for all rows. "
-            "Check that 'google/WaxalNLP' is reachable and IDs in Train.csv match HF dataset IDs."
-        )
-
-    # Convert to Hugging Face Dataset
-    train_dataset = Dataset.from_pandas(train_split_df)
-    val_dataset = Dataset.from_pandas(val_split_df)
+    train_dataset = build_lazy_dataset(train_split_df)
+    val_dataset = build_lazy_dataset(val_split_df)
     
     # 2. Setup device configuration
     if is_tpu:
