@@ -223,7 +223,10 @@ def run_training(args, config, is_tpu=False, index=0):
         )
     else:
         processor = load_processor_for_mms(model_id=model_id, target_lang=args.target_lang)
-        model_dtype = torch.bfloat16 if is_tpu else (torch.float16 if torch.cuda.is_available() else torch.float32)
+        # GPU: always load in float32 — AMP (fp16=True) will cast ops to FP16 on the fly.
+        # Weights must remain FP32 for the GradScaler to unscale correctly.
+        # TPU: load in bfloat16 — TPU has no GradScaler and bf16 is the native dtype.
+        model_dtype = torch.bfloat16 if is_tpu else torch.float32
         model = get_mms_model_with_adapter(
             model_id=model_id,
             target_lang=args.target_lang,
