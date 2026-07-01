@@ -146,20 +146,24 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
     to map ID to speaker_id and audio path info.
     Uses decode=False so audio is stored as raw bytes/path dict (no torchcodec needed).
     Actual decoding happens later via cast_column("audio", Audio(sampling_rate=16000)).
+
+    IMPORTANT: Only loads 'train' and 'validation' splits by name.
+    Calling load_dataset without split= downloads ALL 40 parquet files (including 28
+    unlabeled ones with 70k+ examples), which OOMs the notebook RAM.
+    Specifying split= makes HF download only the 10 labeled parquet files.
     """
     from datasets import Audio as HFAudio
     logger.info(f"Fetching speaker metadata from Hugging Face google/WaxalNLP for {languages}")
     id_to_meta = {}
-    
+
     for lang in languages:
         config_name = f"{lang}_asr"
-        try:
-            ds_dict = load_dataset("google/WaxalNLP", config_name)
-            # Only iterate labeled splits — test and unlabeled splits are not in Train.csv
-            # and iterating them adds 38,000+ wasted examples to the metadata loop.
-            labeled_splits = [s for s in ds_dict.keys() if s not in ("test", "unlabeled")]
-            for split in labeled_splits:
-                split_ds = ds_dict[split].cast_column("audio", HFAudio(decode=False))
+        lang_count = 0
+        for split_name in ["train", "validation"]:
+            try:
+                # Load one split at a time — HF only downloads parquet files for that split
+                split_ds = load_dataset("google/WaxalNLP", config_name, split=split_name)
+                split_ds = split_ds.cast_column("audio", HFAudio(decode=False))
                 for example in split_ds:
                     ex_id = example.get("id") or example.get("client_id")
                     if ex_id:
@@ -167,11 +171,14 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
                             "speaker_id": example.get("speaker_id") or example.get("client_id") or "unknown_speaker",
                             "audio": example.get("audio")  # {"path": ..., "bytes": ...} — decoded later
                         }
-            logger.info(f"Loaded {sum(1 for v in id_to_meta.values() if v)} metadata entries for {lang}")
-        except Exception as e:
-            logger.warning(f"Could not load Hugging Face config {config_name} for metadata mapping: {e}")
-            
+                        lang_count += 1
+            except Exception as e:
+                logger.warning(f"Could not load split '{split_name}' for {config_name}: {e}")
+
+        logger.info(f"Loaded {lang_count} metadata entries for language '{lang}'")
+
     return id_to_meta
+
 
 def prepare_datasets(train_csv_path, test_csv_path, languages=["lin", "sna", "lug"], k_folds=5):
     """
