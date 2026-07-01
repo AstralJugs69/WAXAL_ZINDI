@@ -13,20 +13,36 @@ echo "Language:    $LANG"
 echo "TPU Enabled: ${TPU_FLAG:-"false"}"
 echo "================================="
 
-# Set environment variables for optimized execution
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
 export PYTHONPATH=.
 
-# Restrict to a single GPU (GPU 0) when not using TPU.
-# This prevents Hugging Face Trainer from using PyTorch nn.DataParallel,
-# which is extremely slow and causes the 100s/it bottleneck due to model replication overhead.
-if [ -z "$TPU_FLAG" ]; then
-    export CUDA_VISIBLE_DEVICES=0
-fi
+if [ -n "$TPU_FLAG" ]; then
+    # TPU path — single process that spawns XLA workers internally
+    python src/training/trainer.py \
+        --config "$CONFIG" \
+        --fold "$FOLD" \
+        --target_lang "$LANG" \
+        $TPU_FLAG
+else
+    # GPU path — detect how many CUDA GPUs are visible and use torchrun for DDP
+    N_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
+    echo "Detected GPUs: $N_GPUS"
 
-python src/training/trainer.py \
-    --config "$CONFIG" \
-    --fold "$FOLD" \
-    --target_lang "$LANG" \
-    $TPU_FLAG
+    if [ "$N_GPUS" -gt 1 ]; then
+        echo "Launching with torchrun DDP across $N_GPUS GPUs..."
+        torchrun \
+            --nproc_per_node="$N_GPUS" \
+            --master_port=29500 \
+            src/training/trainer.py \
+            --config "$CONFIG" \
+            --fold "$FOLD" \
+            --target_lang "$LANG"
+    else
+        echo "Single GPU detected — launching standard python..."
+        python src/training/trainer.py \
+            --config "$CONFIG" \
+            --fold "$FOLD" \
+            --target_lang "$LANG"
+    fi
+fi

@@ -110,6 +110,12 @@ def get_compute_metrics_fn(processor, is_seq2seq):
 def run_training(args, config, is_tpu=False, index=0):
     model_id = config["model_id"]
     is_seq2seq = "whisper" in model_id.lower()
+
+    # Determine whether this process is the master (rank-0) process.
+    # In DDP mode (torchrun), LOCAL_RANK is set by the launcher.
+    # In single-GPU or TPU mode, LOCAL_RANK is absent (defaults to 0).
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    is_main_process = (local_rank == 0) and ((not is_tpu) or (index == 0))
     
     # 1. Prepare datasets
     data_config = config["data"]
@@ -136,7 +142,7 @@ def run_training(args, config, is_tpu=False, index=0):
     train_split_df = train_df[train_df["fold"] != args.fold].reset_index(drop=True)
     val_split_df = train_df[train_df["fold"] == args.fold].reset_index(drop=True)
     
-    if (not is_tpu) or (index == 0):
+    if is_main_process:
         logger.info(f"Train split size: {len(train_split_df)} || Val split size: {len(val_split_df)}")
     
     # Lazily construct HF datasets using select to avoid copying raw audio bytes to RAM
@@ -204,10 +210,10 @@ def run_training(args, config, is_tpu=False, index=0):
             import torch.backends.cudnn as cudnn
             cudnn.benchmark = True
         
-    if (not is_tpu) or (index == 0):
+    if is_main_process:
         logger.info(f"Target device resolved: {device}")
         if not is_tpu and torch.cuda.is_available():
-            logger.info(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
+            logger.info(f"CUDA Device Name: {torch.cuda.get_device_name(local_rank)}")
             
     # 3. Load processor and model
     if is_seq2seq:
@@ -264,24 +270,26 @@ def run_training(args, config, is_tpu=False, index=0):
     train_dataset = train_dataset.filter(hf_filter_fn, desc="Filtering train dataset by duration/WPS")
     val_dataset = val_dataset.filter(hf_filter_fn, desc="Filtering val dataset by duration/WPS")
     
-    if (not is_tpu) or (index == 0):
+    if is_main_process:
         logger.info(f"After duration/WPS filter — Train dataset: {len(train_dataset)} || Val dataset: {len(val_dataset)}")
 
     # -----------------------------------------------------------------------
     # Optionally load external open-source corpora (Common Voice, FLEURS)
     # and concatenate with WAXAL training data to prevent acoustic overfitting.
-    # Only loads on GPU (index == 0 on TPU to avoid multi-process download races).
+    # All DDP ranks load independently (HF datasets cache handles concurrency).
     # -----------------------------------------------------------------------
-    if data_config.get("use_external_corpora", False) and ((not is_tpu) or (index == 0)):
+    if data_config.get("use_external_corpora", False):
         try:
             from src.data.external_corpora import load_external_corpus
             from datasets import concatenate_datasets as _ext_cat
             ext_sources = data_config.get("external_corpora_sources", ["common_voice", "fleurs"])
-            logger.info(f"Loading external corpora for '{args.target_lang}': {ext_sources}")
+            if is_main_process:
+                logger.info(f"Loading external corpora for '{args.target_lang}': {ext_sources}")
             external_ds = load_external_corpus(args.target_lang, sources=ext_sources)
             if external_ds is not None and len(external_ds) > 0:
                 train_dataset = _ext_cat([train_dataset, external_ds])
-                logger.info(f"Train dataset after external corpora merge: {len(train_dataset)} examples")
+                if is_main_process:
+                    logger.info(f"Train dataset after external corpora merge: {len(train_dataset)} examples")
         except Exception as exc:
             logger.warning(f"External corpora loading failed ({exc}). Continuing with WAXAL data only.")
     
@@ -368,15 +376,15 @@ def run_training(args, config, is_tpu=False, index=0):
     )
     
     # 7. Start training
-    if (not is_tpu) or (index == 0):
+    if is_main_process:
         logger.info("Starting model training...")
     # Flush GPU memory before starting the training loop
     if not is_tpu and torch.cuda.is_available():
         torch.cuda.empty_cache()
     trainer.train()
     
-    # Save the best model
-    if (not is_tpu) or (index == 0):
+    # Save the best model — rank 0 only to avoid concurrent file writes
+    if is_main_process:
         logger.info(f"Saving best model to {output_dir}/best_model")
         processor.save_pretrained(f"{output_dir}/best_model")
         model.save_pretrained(f"{output_dir}/best_model")
