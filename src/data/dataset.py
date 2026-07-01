@@ -155,8 +155,10 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
         config_name = f"{lang}_asr"
         try:
             ds_dict = load_dataset("google/WaxalNLP", config_name)
-            # Disable audio decoding so we can iterate without torchcodec
-            for split in ds_dict.keys():
+            # Only iterate labeled splits — test and unlabeled splits are not in Train.csv
+            # and iterating them adds 38,000+ wasted examples to the metadata loop.
+            labeled_splits = [s for s in ds_dict.keys() if s not in ("test", "unlabeled")]
+            for split in labeled_splits:
                 split_ds = ds_dict[split].cast_column("audio", HFAudio(decode=False))
                 for example in split_ds:
                     ex_id = example.get("id") or example.get("client_id")
