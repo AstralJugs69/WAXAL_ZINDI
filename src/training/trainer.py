@@ -495,8 +495,7 @@ def run_training(args, config, is_tpu=False, index=0):
         "weight_decay": train_args["weight_decay"],
         "group_by_length": train_args.get("group_by_length", False),  # Disabled to prevent LengthGroupedSampler error when dynamic padding is used
         # On GPU, use 2 workers to prefetch and decode audio in background while GPU trains.
-        # On TPU, keep 0 to avoid Arrow file lock contention across processes.
-        "dataloader_num_workers": train_args.get("dataloader_num_workers", 0) if is_tpu else min(train_args.get("dataloader_num_workers", 2), 2),
+        "dataloader_num_workers": 0 if is_tpu else min(train_args.get("dataloader_num_workers", 2), 2),
         "remove_unused_columns": False,
         "report_to": ["none"],
         "ddp_find_unused_parameters": True
