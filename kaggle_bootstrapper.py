@@ -55,18 +55,14 @@ def main():
         os.environ["HF_TOKEN"] = hf_token
         print("Successfully configured HF_TOKEN environment variable.")
 
-    print("=== Step 0: Wiping Disk Cache & Freeing Space ===")
-    # Clear HuggingFace dataset caches to prevent notebook crashes
-    hf_cache_dir = os.path.expanduser("~/.cache/huggingface/datasets")
-    if os.path.exists(hf_cache_dir):
-        print(f"Removing HF dataset cache at: {hf_cache_dir}")
-        try:
-            shutil.rmtree(hf_cache_dir)
-            print("HF dataset cache cleared successfully.")
-        except Exception as e:
-            print(f"Warning: Failed to clear HF cache: {e}")
-            
-    # Clear old project directory to ensure fresh clone
+    # Configure HuggingFace cache to persist on the working disk drive (preserves datasets/models between runs)
+    hf_home = os.path.join(working_dir, "hf_home")
+    os.environ["HF_HOME"] = hf_home
+    os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
+    print(f"HuggingFace cache configured to persist at: {hf_home}")
+
+    print("=== Step 0: Wiping Old Project & Freeing Space ===")
+    # Clear old project directory to ensure fresh clone (do NOT wipe hf_home cache)
     if os.path.exists(project_dir):
         print(f"Removing old project directory at: {project_dir}")
         try:

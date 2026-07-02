@@ -4,6 +4,12 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # Prevent XLA client memo
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # Prevent VRAM fragmentation OOMs on 16GB GPUs (P100/T4)
 os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"  # Use high performance transfer with Xet for HuggingFace datasets
 
+# Configure HuggingFace cache directories dynamically to persist on the working disk drive
+working_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "/content"
+hf_home = os.environ.get("HF_HOME", os.path.join(working_dir, "hf_home"))
+os.environ["HF_HOME"] = hf_home
+os.environ["HF_DATASETS_CACHE"] = os.environ.get("HF_DATASETS_CACHE", os.path.join(hf_home, "datasets"))
+
 
 # Debug log TPU environment variables for diagnosis
 tpu_vars = {k: v for k, v in os.environ.items() if "TPU" in k}
