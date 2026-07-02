@@ -32,19 +32,28 @@ def run_command_live(cmd, cwd=None):
 
 def main():
     repo_url = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
-    working_dir = "/kaggle/working"
+    working_dir = "/kaggle/working" if os.path.exists("/kaggle") else "/content"
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
-    # Load HF_TOKEN from Kaggle Secrets if configured
-    try:
-        from kaggle_secrets import UserSecretsClient
-        user_secrets = UserSecretsClient()
-        hf_token = user_secrets.get_secret("HF_TOKEN")
-        if hf_token:
-            os.environ["HF_TOKEN"] = hf_token
-            print("Successfully configured HF_TOKEN environment variable from Kaggle Secrets.")
-    except Exception:
-        pass
+    # Load HF_TOKEN from Kaggle Secrets or Colab Secrets if configured
+    hf_token = None
+    if os.path.exists("/kaggle"):
+        try:
+            from kaggle_secrets import UserSecretsClient
+            user_secrets = UserSecretsClient()
+            hf_token = user_secrets.get_secret("HF_TOKEN")
+        except Exception:
+            pass
+    else:
+        try:
+            from google.colab import userdata
+            hf_token = userdata.get("HF_TOKEN")
+        except Exception:
+            pass
+
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
+        print("Successfully configured HF_TOKEN environment variable.")
 
     print("=== Step 0: Wiping Disk Cache & Freeing Space ===")
     # Clear HuggingFace dataset caches to prevent notebook crashes
@@ -85,15 +94,15 @@ def main():
         if os.path.exists(script_path):
             os.chmod(script_path, 0o755)
 
-    print("\n=== Scanning Kaggle Workspace Files ===")
-    if os.path.exists("/kaggle"):
-        for root, dirs, files in os.walk("/kaggle"):
-            # Limit depth to keep logs concise
-            depth = root.replace("/kaggle", "").count(os.sep)
-            if depth <= 3 and ".git" not in root and "__pycache__" not in root:
-                print(f"{'  ' * depth}[DIR] {root}")
-                for f in files[:10]:
-                    print(f"{'  ' * (depth + 1)}[FILE] {f}")
+    scan_root = "/kaggle" if os.path.exists("/kaggle") else "/content"
+    print(f"\n=== Scanning {scan_root} Workspace Files ===")
+    for root, dirs, files in os.walk(scan_root):
+        # Limit depth to keep logs concise
+        depth = root.replace(scan_root, "").count(os.sep)
+        if depth <= 3 and ".git" not in root and "__pycache__" not in root:
+            print(f"{'  ' * depth}[DIR] {root}")
+            for f in files[:10]:
+                print(f"{'  ' * (depth + 1)}[FILE] {f}")
                     
     # Detect if TPU environment is active
     tpu_active = False
@@ -102,12 +111,17 @@ def main():
     print(f"\n=== TPU Accelerator Detected: {tpu_active} ===")
     
     if tpu_active:
-        print("Installing PyTorch/XLA 2.8.0 wheels for TPU VMs (Python 3.12)...")
-        run_command_live([
-            "pip", "install", "--upgrade",
-            "torch==2.8.0", "torch_xla[tpu]==2.8.0", 
-            "-f", "https://storage.googleapis.com/libtpu-releases/index.html"
-        ])
+        try:
+            import torch_xla
+            import torch_xla.core.xla_model as xm
+            print("torch_xla is already installed and importable. Skipping wheels installation.")
+        except ImportError:
+            print("Installing PyTorch/XLA 2.8.0 wheels for TPU VMs (Python 3.12)...")
+            run_command_live([
+                "pip", "install", "--upgrade",
+                "torch==2.8.0", "torch_xla[tpu]==2.8.0", 
+                "-f", "https://storage.googleapis.com/libtpu-releases/index.html"
+            ])
         
     # Detect if we are on a Tesla P100 GPU and need to install sm_60 (Pascal) compatible PyTorch wheels
     p100_detected = False
