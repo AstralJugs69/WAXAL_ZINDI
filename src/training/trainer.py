@@ -15,9 +15,11 @@ import yaml
 import logging
 import torch
 import numpy as np
-# Monkey-patch numpy.row_stack for NumPy 2.x compatibility with older numba builds
+# Monkey-patch numpy.row_stack and numpy.trapz for NumPy 2.x compatibility with older numba builds
 if not hasattr(np, "row_stack"):
     np.row_stack = np.vstack
+if not hasattr(np, "trapz"):
+    np.trapz = getattr(np, "trapezoid", lambda *args, **kwargs: None)
 
 # Monkey-patch numpy.dtypes.StringDType for compatibility with JAX on older numpy versions
 try:
@@ -429,6 +431,12 @@ def run_training(args, config, is_tpu=False, index=0):
         training_kwargs["predict_with_generate"] = True
         training_kwargs["generation_max_length"] = 225
         
+    # Filter training_kwargs against the signature of training_class to prevent version mismatch errors (e.g., deprecated group_by_length in transformers 5.x)
+    import inspect
+    sig = inspect.signature(training_class)
+    valid_args = {p.name for p in sig.parameters.values() if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
+    training_kwargs = {k: v for k, v in training_kwargs.items() if k in valid_args}
+
     trainer_args = training_class(**training_kwargs)
     
     # 6. Initialize trainer
