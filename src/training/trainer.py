@@ -330,17 +330,32 @@ def run_training(args, config, is_tpu=False, index=0):
         )
         model = model.to(device)
         
-    # Wrap model forward pass to auto-cast float32 input tensors to the model's parameter dtype
+    # Wrap model forward pass to auto-cast float32 input tensors to the model's input layer dtype
     # (prevents "Input type (float) and bias type (c10::BFloat16) should be the same" errors on TPU/bf16)
     original_forward = model.forward
     def safe_forward(*args, **kwargs):
-        model_dtype = next(model.parameters()).dtype
+        # Resolve target input dtype dynamically based on the model/encoder architecture
+        if hasattr(model, "wav2vec2"):
+            target_dtype = model.wav2vec2.feature_extractor.conv_layers[0].conv.weight.dtype
+        elif hasattr(model, "model") and hasattr(model.model, "encoder") and hasattr(model.model.encoder, "conv1"):
+            target_dtype = model.model.encoder.conv1.weight.dtype
+        elif hasattr(model, "active_adapter") and hasattr(model, "base_model"):
+            base = model.base_model.model
+            if hasattr(base, "wav2vec2"):
+                target_dtype = base.wav2vec2.feature_extractor.conv_layers[0].conv.weight.dtype
+            elif hasattr(base, "model") and hasattr(base.model, "encoder") and hasattr(base.model.encoder, "conv1"):
+                target_dtype = base.model.encoder.conv1.weight.dtype
+            else:
+                target_dtype = next(model.parameters()).dtype
+        else:
+            target_dtype = next(model.parameters()).dtype
+
         new_args = [
-            arg.to(dtype=model_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
+            arg.to(dtype=target_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
             for arg in args
         ]
         new_kwargs = {
-            k: v.to(dtype=model_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
+            k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
             for k, v in kwargs.items()
         }
         return original_forward(*new_args, **new_kwargs)
