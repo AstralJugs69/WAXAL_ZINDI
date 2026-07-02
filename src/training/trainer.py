@@ -375,7 +375,19 @@ def run_training(args, config, is_tpu=False, index=0):
             k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
             for k, v in kwargs.items()
         }
-        return original_forward(*new_args, **new_kwargs)
+        
+        try:
+            return original_forward(*new_args, **new_kwargs)
+        except Exception as e:
+            print(f"[ERROR safe_forward] Exception caught: {e}", flush=True)
+            print(f"  target_dtype={target_dtype}", flush=True)
+            for i, arg in enumerate(new_args):
+                if isinstance(arg, torch.Tensor):
+                    print(f"  new_arg[{i}] tensor dtype={arg.dtype} shape={arg.shape}", flush=True)
+            for k, v in new_kwargs.items():
+                if isinstance(v, torch.Tensor):
+                    print(f"  new_kwarg[{k}] tensor dtype={v.dtype} shape={v.shape}", flush=True)
+            raise e
     safe_forward.step_count = 0
     model.forward = safe_forward
         
