@@ -35,16 +35,7 @@ def main():
     working_dir = "/kaggle/working"
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
-    print("=== Step 0: Wiping Disk Cache & Freeing Space ===")
-    # Clear HuggingFace dataset caches (where the massive duplicate caches accumulate)
-    hf_cache_dir = os.path.expanduser("~/.cache/huggingface/datasets")
-    if os.path.exists(hf_cache_dir):
-        print(f"Removing HF dataset cache at: {hf_cache_dir}")
-        try:
-            shutil.rmtree(hf_cache_dir)
-            print("HF dataset cache cleared successfully.")
-        except Exception as e:
-            print(f"Warning: Failed to clear HF cache: {e}")
+    print("=== Step 0: Wiping Old Project & Freeing Space ===")
             
     # Clear old project directory to ensure fresh clone
     if os.path.exists(project_dir):
