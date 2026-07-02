@@ -40,8 +40,9 @@ if command -v nvidia-smi &> /dev/null; then
 fi
 
 echo "=== Generating PyTorch Version Constraints ==="
-# Pin all pre-installed core packages to prevent pip from backtracking or downloading incompatible wheels
-pip freeze | grep -E "^(torch|torchaudio|torchvision|numpy|intel-openmp|mkl|pyarrow|datasets|transformers|peft|accelerate|bitsandbytes|librosa|soundfile|pyctcdecode|evaluate|jiwer|pyyaml|tqdm|scikit-learn|optuna|webrtcvad)==" > constraints.txt
+# Pin pre-installed core packages to prevent pip from backtracking or downloading incompatible wheels.
+# Exclude numpy (handled separately per environment) and pyctcdecode (has numpy<2 pin incompatible with TPU's numpy 2.x).
+pip freeze | grep -E "^(torch|torchaudio|torchvision|intel-openmp|mkl|pyarrow|datasets|transformers|peft|accelerate|bitsandbytes|librosa|soundfile|evaluate|jiwer|pyyaml|tqdm|scikit-learn|optuna|webrtcvad)==" > constraints.txt
 echo "Generated constraints:"
 cat constraints.txt
 
@@ -49,7 +50,9 @@ echo "=== Installing Python Requirements ==="
 pip install --upgrade pip
 # Replace full tensorflow with CPU-only build to avoid GPU/TPU driver conflicts with torch-xla
 pip install tensorflow-cpu --quiet 2>/dev/null || true
-pip install -c constraints.txt -r requirements.txt
+pip install -c constraints.txt -r requirements.txt --ignore-installed pyctcdecode
+# Install pyctcdecode separately with --no-deps to avoid its numpy<2 pin conflicting with numpy 2.x on TPU
+pip install pyctcdecode>=0.5.0 --no-deps
 
 echo "=== Compiling KenLM ==="
 # Trigger our automated compilation utility
