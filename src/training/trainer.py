@@ -376,6 +376,10 @@ def run_training(args, config, is_tpu=False, index=0):
             for k, v in kwargs.items()
         }
         
+        if static_step_count < 3:
+            print(f"[DEBUG safe_forward] Cast new_args dtypes={[x.dtype if isinstance(x, torch.Tensor) else type(x) for x in new_args]}", flush=True)
+            print(f"[DEBUG safe_forward] Cast new_kwargs dtypes={ {k: v.dtype if isinstance(v, torch.Tensor) else type(v) for k, v in new_kwargs.items()} }", flush=True)
+
         try:
             return original_forward(*new_args, **new_kwargs)
         except Exception as e:
