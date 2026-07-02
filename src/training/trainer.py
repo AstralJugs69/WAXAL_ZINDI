@@ -408,6 +408,28 @@ def run_training(args, config, is_tpu=False, index=0):
                 logger.info(f"Loading external corpora for '{args.target_lang}': {ext_sources}")
             external_ds = load_external_corpus(args.target_lang, sources=ext_sources)
             if external_ds is not None and len(external_ds) > 0:
+                # Define filter function for external corpus to align with WAXAL duration/WPS limits
+                def ext_filter_fn(example):
+                    from src.data.dataset import get_audio_data
+                    audio_info = example["audio"]
+                    array, sr = get_audio_data(audio_info)
+                    if array is None or sr is None:
+                        return False
+                    duration = len(array) / sr
+                    if duration < data_config["duration_min"] or duration > data_config["duration_max"]:
+                        return False
+                    transcript = example.get("normalized_transcription") or example.get("transcription") or ""
+                    word_count = len(transcript.split())
+                    if duration > 0:
+                        wps = word_count / duration
+                        if wps < data_config["wps_min"] or wps > data_config["wps_max"]:
+                            return False
+                    return True
+                
+                if is_main_process:
+                    logger.info("Applying duration/WPS filter to external corpus...")
+                external_ds = external_ds.filter(ext_filter_fn, desc="Filtering external corpus by duration/WPS")
+                
                 train_dataset = _ext_cat([train_dataset, external_ds])
                 if is_main_process:
                     logger.info(f"Train dataset after external corpora merge: {len(train_dataset)} examples")
