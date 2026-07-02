@@ -48,9 +48,9 @@ cat constraints.txt
 
 echo "=== Installing Python Requirements ==="
 pip install --upgrade pip
-# Install hf_transfer for 5-10x faster HuggingFace downloads (Rust-based parallel downloader)
-pip install hf_transfer --quiet 2>/dev/null || true
-export HF_HUB_ENABLE_HF_TRANSFER=1
+# Install hf-xet and hf_transfer for fast HuggingFace downloads
+pip install hf-xet hf_transfer --quiet 2>/dev/null || true
+export HF_XET_HIGH_PERFORMANCE=1
 # Replace full tensorflow with CPU-only build to avoid GPU/TPU driver conflicts with torch-xla
 pip install tensorflow-cpu --quiet 2>/dev/null || true
 pip install -c constraints.txt -r requirements.txt

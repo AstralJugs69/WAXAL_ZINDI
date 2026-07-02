@@ -2,7 +2,7 @@ import os
 os.environ["JAX_PLATFORMS"] = "cpu"  # Prevent JAX from locking TPU device on import
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # Prevent XLA client memory pre-allocation
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # Prevent VRAM fragmentation OOMs on 16GB GPUs (P100/T4)
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"  # Use Rust-based parallel downloader for HuggingFace datasets
+os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"  # Use high performance transfer with Xet for HuggingFace datasets
 
 
 # Remove Kaggle environment variables that interfere with PJRT single-host auto-detection
