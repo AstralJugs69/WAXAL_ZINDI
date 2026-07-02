@@ -32,7 +32,7 @@ def run_command_live(cmd, cwd=None):
 
 def main():
     repo_url = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
-    working_dir = "/kaggle/working" if os.path.exists("/kaggle") else "/content"
+    working_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "/content"
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
     # Load HF_TOKEN from Kaggle Secrets or Colab Secrets if configured
