@@ -290,8 +290,11 @@ def run_training(args, config, is_tpu=False, index=0):
             if split_name not in full_ds:
                 continue
             split_ds = full_ds[split_name]
+            # Restrict format to ID columns to avoid decoding audio during filtering
+            split_ds_formatted = split_ds.with_format(columns=["id", "client_id"])
+            
             # Vectorized filter — runs in Arrow/C++, much faster than Python enumerate loop
-            split_ds_filtered = split_ds.filter(
+            split_ds_filtered = split_ds_formatted.filter(
                 lambda batch: [ex_id in id_set for ex_id in (batch.get("id") or batch.get("client_id"))],
                 batched=True,
                 batch_size=1000,
@@ -304,6 +307,8 @@ def run_training(args, config, is_tpu=False, index=0):
             raise ValueError(f"No matching IDs found in HF dataset for the split.")
             
         concat_ds = concatenate_datasets(selected_ds_list)
+        # Keep format restricted to ID columns during mapping to avoid audio decoding
+        concat_ds_formatted = concat_ds.with_format(columns=["id", "client_id"])
         
         # Map labels by ID using a fast batched map
         def add_labels(batch):
@@ -311,8 +316,9 @@ def run_training(args, config, is_tpu=False, index=0):
             batch["normalized_transcription"] = [id_to_label.get(ex_id, "") for ex_id in ids]
             return batch
         
-        concat_ds = concat_ds.map(add_labels, batched=True, batch_size=1000, desc="Attaching labels")
-        return concat_ds
+        concat_ds_mapped = concat_ds_formatted.map(add_labels, batched=True, batch_size=1000, desc="Attaching labels")
+        # Restore full format to enable lazy audio decoding for training
+        return concat_ds_mapped.with_format(None)
 
     train_dataset = build_lazy_dataset(train_split_df)
     val_dataset = build_lazy_dataset(val_split_df)
