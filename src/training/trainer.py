@@ -80,6 +80,59 @@ if not hasattr(np_dtypes, "StringDType"):
     np_dtypes.StringDType = MockStringDType
     np.dtypes.StringDType = MockStringDType
 
+
+# Class-level monkey-patching for transformers models to align floating-point input dtypes with bfloat16 parameter layers on TPU/bf16.
+# By patching at the class level, we guarantee that all instances (including compiled, wrapped, or copied versions) inherit the fix.
+from transformers import Wav2Vec2ForCTC, WhisperForConditionalGeneration
+
+# 1. Wav2Vec2/MMS CTC model class patch
+original_wav2vec2_forward = Wav2Vec2ForCTC.forward
+def patched_wav2vec2_forward(self, *args, **kwargs):
+    # Resolve target dtype dynamically based on the model's feature extractor layer
+    if hasattr(self, "wav2vec2"):
+        target_dtype = self.wav2vec2.feature_extractor.conv_layers[0].conv.weight.dtype
+    else:
+        target_dtype = next(self.parameters()).dtype
+
+    # Force bfloat16 on TPU if resolved to float32
+    if os.environ.get("TPU_ACCELERATOR_TYPE") or "xla" in str(self.device):
+        if target_dtype == torch.float32:
+            target_dtype = torch.bfloat16
+
+    new_args = [
+        arg.to(dtype=target_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
+        for arg in args
+    ]
+    new_kwargs = {
+        k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
+        for k, v in kwargs.items()
+    }
+    return original_wav2vec2_forward(self, *new_args, **new_kwargs)
+Wav2Vec2ForCTC.forward = patched_wav2vec2_forward
+
+# 2. Whisper Seq2Seq model class patch
+original_whisper_forward = WhisperForConditionalGeneration.forward
+def patched_whisper_forward(self, *args, **kwargs):
+    if hasattr(self, "model") and hasattr(self.model, "encoder") and hasattr(self.model.encoder, "conv1"):
+        target_dtype = self.model.encoder.conv1.weight.dtype
+    else:
+        target_dtype = next(self.parameters()).dtype
+
+    if os.environ.get("TPU_ACCELERATOR_TYPE") or "xla" in str(self.device):
+        if target_dtype == torch.float32:
+            target_dtype = torch.bfloat16
+
+    new_args = [
+        arg.to(dtype=target_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
+        for arg in args
+    ]
+    new_kwargs = {
+        k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
+        for k, v in kwargs.items()
+    }
+    return original_whisper_forward(self, *new_args, **new_kwargs)
+WhisperForConditionalGeneration.forward = patched_whisper_forward
+
 import jiwer
 import pandas as pd
 from datasets import Dataset, Audio
@@ -329,71 +382,7 @@ def run_training(args, config, is_tpu=False, index=0):
             torch_dtype=model_dtype
         )
         model = model.to(device)
-        
-    # Wrap model forward pass to auto-cast float32 input tensors to the model's input layer dtype
-    # (prevents "Input type (float) and bias type (c10::BFloat16) should be the same" errors on TPU/bf16)
-    original_forward = model.forward
-    def safe_forward(*args, **kwargs):
-        # Resolve target input dtype dynamically based on the model/encoder architecture
-        if hasattr(model, "wav2vec2"):
-            target_dtype = model.wav2vec2.feature_extractor.conv_layers[0].conv.weight.dtype
-        elif hasattr(model, "model") and hasattr(model.model, "encoder") and hasattr(model.model.encoder, "conv1"):
-            target_dtype = model.model.encoder.conv1.weight.dtype
-        elif hasattr(model, "active_adapter") and hasattr(model, "base_model"):
-            base = model.base_model.model
-            if hasattr(base, "wav2vec2"):
-                target_dtype = base.wav2vec2.feature_extractor.conv_layers[0].conv.weight.dtype
-            elif hasattr(base, "model") and hasattr(base.model, "encoder") and hasattr(base.model.encoder, "conv1"):
-                target_dtype = base.model.encoder.conv1.weight.dtype
-            else:
-                target_dtype = next(model.parameters()).dtype
-        else:
-            target_dtype = next(model.parameters()).dtype
-
-        # On TPU, if target_dtype is resolved as float32 but we are running in bf16 mode,
-        # override it to bfloat16 to prevent mismatch crashes with the conv layers' biases.
-        if is_tpu and target_dtype == torch.float32:
-            target_dtype = torch.bfloat16
-
-        # Print debug diagnostics for the first step to verify casting execution
-        static_step_count = getattr(safe_forward, "step_count", 0)
-        if static_step_count < 3:
-            print(f"[DEBUG safe_forward] Step={static_step_count} | target_dtype={target_dtype}", flush=True)
-            for i, arg in enumerate(args):
-                if isinstance(arg, torch.Tensor):
-                    print(f"  arg[{i}] tensor dtype={arg.dtype} shape={arg.shape}", flush=True)
-            for k, v in kwargs.items():
-                if isinstance(v, torch.Tensor):
-                    print(f"  kwarg[{k}] tensor dtype={v.dtype} shape={v.shape}", flush=True)
-            safe_forward.step_count = static_step_count + 1
-
-        new_args = [
-            arg.to(dtype=target_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
-            for arg in args
-        ]
-        new_kwargs = {
-            k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
-            for k, v in kwargs.items()
-        }
-        
-        if static_step_count < 3:
-            print(f"[DEBUG safe_forward] Cast new_args dtypes={[x.dtype if isinstance(x, torch.Tensor) else type(x) for x in new_args]}", flush=True)
-            print(f"[DEBUG safe_forward] Cast new_kwargs dtypes={ {k: v.dtype if isinstance(v, torch.Tensor) else type(v) for k, v in new_kwargs.items()} }", flush=True)
-
-        try:
-            return original_forward(*new_args, **new_kwargs)
-        except Exception as e:
-            print(f"[ERROR safe_forward] Exception caught: {e}", flush=True)
-            print(f"  target_dtype={target_dtype}", flush=True)
-            for i, arg in enumerate(new_args):
-                if isinstance(arg, torch.Tensor):
-                    print(f"  new_arg[{i}] tensor dtype={arg.dtype} shape={arg.shape}", flush=True)
-            for k, v in new_kwargs.items():
-                if isinstance(v, torch.Tensor):
-                    print(f"  new_kwarg[{k}] tensor dtype={v.dtype} shape={v.shape}", flush=True)
-            raise e
-    safe_forward.step_count = 0
-    model.forward = safe_forward
+        model = model.to(device)
         
     # Ensure all targets are mapped and audio is decoded at 16kHz
     train_dataset = train_dataset.cast_column("audio", Audio(sampling_rate=16000))
