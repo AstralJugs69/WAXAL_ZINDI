@@ -5,8 +5,16 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # Prevent VRAM fr
 os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"  # Use high performance transfer with Xet for HuggingFace datasets
 
 
-# Remove Kaggle environment variables that interfere with PJRT single-host auto-detection
-for env_var in ["TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID"]:
+# Debug log TPU environment variables for diagnosis
+tpu_vars = {k: v for k, v in os.environ.items() if "TPU" in k}
+if tpu_vars:
+    print(f"[TPU Env Debug] {tpu_vars}")
+
+# Clean up environment variables to force PJRT single-host local device discovery on single TPU VM nodes (like Colab TPU v5e-1)
+# and prevent metadata service query mismatch (expected 4 workers, got 1)
+os.environ["TPU_SKIP_MDS_QUERY"] = "1"
+
+for env_var in ["TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID", "TPU_WORKER_ADDRESSES", "TPU_WORKER_PORT"]:
     if env_var in os.environ:
         os.environ.pop(env_var)
 
