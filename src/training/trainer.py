@@ -37,7 +37,7 @@ import sys
 # Eagerly imports librosa to trigger all lazy Numba ufunc decorations, patching missing NumPy 2.x attributes on-the-fly.
 while True:
     try:
-        import librosa
+        import librosa.core.audio
         break
     except AttributeError as e:
         msg = str(e)
