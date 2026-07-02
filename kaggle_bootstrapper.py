@@ -35,6 +35,17 @@ def main():
     working_dir = "/kaggle/working"
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
+    # Load HF_TOKEN from Kaggle Secrets if configured
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        hf_token = user_secrets.get_secret("HF_TOKEN")
+        if hf_token:
+            os.environ["HF_TOKEN"] = hf_token
+            print("Successfully configured HF_TOKEN environment variable from Kaggle Secrets.")
+    except Exception:
+        pass
+
     print("=== Step 0: Wiping Disk Cache & Freeing Space ===")
     # Clear HuggingFace dataset caches to prevent notebook crashes
     hf_cache_dir = os.path.expanduser("~/.cache/huggingface/datasets")
