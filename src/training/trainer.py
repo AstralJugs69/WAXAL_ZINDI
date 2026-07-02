@@ -350,6 +350,23 @@ def run_training(args, config, is_tpu=False, index=0):
         else:
             target_dtype = next(model.parameters()).dtype
 
+        # On TPU, if target_dtype is resolved as float32 but we are running in bf16 mode,
+        # override it to bfloat16 to prevent mismatch crashes with the conv layers' biases.
+        if is_tpu and target_dtype == torch.float32:
+            target_dtype = torch.bfloat16
+
+        # Print debug diagnostics for the first step to verify casting execution
+        static_step_count = getattr(safe_forward, "step_count", 0)
+        if static_step_count < 3:
+            print(f"[DEBUG safe_forward] Step={static_step_count} | target_dtype={target_dtype}", flush=True)
+            for i, arg in enumerate(args):
+                if isinstance(arg, torch.Tensor):
+                    print(f"  arg[{i}] tensor dtype={arg.dtype} shape={arg.shape}", flush=True)
+            for k, v in kwargs.items():
+                if isinstance(v, torch.Tensor):
+                    print(f"  kwarg[{k}] tensor dtype={v.dtype} shape={v.shape}", flush=True)
+            safe_forward.step_count = static_step_count + 1
+
         new_args = [
             arg.to(dtype=target_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
             for arg in args
@@ -359,6 +376,7 @@ def run_training(args, config, is_tpu=False, index=0):
             for k, v in kwargs.items()
         }
         return original_forward(*new_args, **new_kwargs)
+    safe_forward.step_count = 0
     model.forward = safe_forward
         
     # Ensure all targets are mapped and audio is decoded at 16kHz
