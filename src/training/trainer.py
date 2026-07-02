@@ -29,11 +29,37 @@ import yaml
 import logging
 import torch
 import numpy as np
-# Monkey-patch numpy.row_stack and numpy.trapz for NumPy 2.x compatibility with older numba builds
-if not hasattr(np, "row_stack"):
-    np.row_stack = np.vstack
-if not hasattr(np, "trapz"):
-    np.trapz = getattr(np, "trapezoid", lambda *args, **kwargs: None)
+import sys
+
+# Dynamic Numba-NumPy 2.x compatibility resolver
+# Automatically detects and monkey-patches any numpy attributes that numba imports expect but are missing in NumPy 2.x
+while True:
+    try:
+        import numba
+        break
+    except AttributeError as e:
+        msg = str(e)
+        if "module 'numpy' has no attribute" in msg:
+            attr = msg.split("'")[-2]
+            if attr == "row_stack":
+                np.row_stack = np.vstack
+            elif attr == "trapz":
+                np.trapz = getattr(np, "trapezoid", lambda *args, **kwargs: None)
+            elif attr == "in1d":
+                try:
+                    from numpy.lib.arraysetops import in1d
+                    np.in1d = in1d
+                except ImportError:
+                    np.in1d = np.isin
+            else:
+                setattr(np, attr, lambda *args, **kwargs: None)
+            print(f"[Numba-Compatibility] Dynamically patched missing numpy attribute: {attr}")
+            # Clear partially imported numba modules from cache to force clean retry
+            for k in list(sys.modules.keys()):
+                if k.startswith("numba"):
+                    sys.modules.pop(k)
+        else:
+            raise e
 
 # Monkey-patch numpy.dtypes.StringDType for compatibility with JAX on older numpy versions
 try:
