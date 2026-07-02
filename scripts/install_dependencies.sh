@@ -53,7 +53,7 @@ pip install hf_transfer --quiet 2>/dev/null || true
 export HF_HUB_ENABLE_HF_TRANSFER=1
 # Replace full tensorflow with CPU-only build to avoid GPU/TPU driver conflicts with torch-xla
 pip install tensorflow-cpu --quiet 2>/dev/null || true
-pip install -c constraints.txt -r requirements.txt --ignore-installed pyctcdecode
+pip install -c constraints.txt -r requirements.txt
 # Install pyctcdecode separately with --no-deps to avoid its numpy<2 pin conflicting with numpy 2.x on TPU
 pip install pyctcdecode>=0.5.0 --no-deps
 
