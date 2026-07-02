@@ -15,6 +15,10 @@ import yaml
 import logging
 import torch
 import numpy as np
+# Monkey-patch numpy.row_stack for NumPy 2.x compatibility with older numba builds
+if not hasattr(np, "row_stack"):
+    np.row_stack = np.vstack
+
 # Monkey-patch numpy.dtypes.StringDType for compatibility with JAX on older numpy versions
 try:
     import numpy.dtypes as np_dtypes
