@@ -330,6 +330,22 @@ def run_training(args, config, is_tpu=False, index=0):
         )
         model = model.to(device)
         
+    # Wrap model forward pass to auto-cast float32 input tensors to the model's parameter dtype
+    # (prevents "Input type (float) and bias type (c10::BFloat16) should be the same" errors on TPU/bf16)
+    original_forward = model.forward
+    def safe_forward(*args, **kwargs):
+        model_dtype = next(model.parameters()).dtype
+        new_args = [
+            arg.to(dtype=model_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
+            for arg in args
+        ]
+        new_kwargs = {
+            k: v.to(dtype=model_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
+            for k, v in kwargs.items()
+        }
+        return original_forward(*new_args, **new_kwargs)
+    model.forward = safe_forward
+        
     # Ensure all targets are mapped and audio is decoded at 16kHz
     train_dataset = train_dataset.cast_column("audio", Audio(sampling_rate=16000))
     val_dataset = val_dataset.cast_column("audio", Audio(sampling_rate=16000))

@@ -37,23 +37,25 @@ def main():
 
     # Load HF_TOKEN from Kaggle Secrets or Colab Secrets if configured
     hf_token = None
-    if os.path.exists("/kaggle"):
+    if os.path.exists("/kaggle/working"):
         try:
             from kaggle_secrets import UserSecretsClient
             user_secrets = UserSecretsClient()
             hf_token = user_secrets.get_secret("HF_TOKEN")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Failed to load HF_TOKEN from Kaggle Secrets: {e}")
     else:
         try:
             from google.colab import userdata
             hf_token = userdata.get("HF_TOKEN")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Failed to load HF_TOKEN from Colab Secrets: {e}")
 
     if hf_token:
         os.environ["HF_TOKEN"] = hf_token
         print("Successfully configured HF_TOKEN environment variable.")
+    else:
+        print("Notice: HF_TOKEN env var not set. Gated HuggingFace datasets (Common Voice) will be skipped.")
 
     # Configure HuggingFace cache to persist on the working disk drive (preserves datasets/models between runs)
     hf_home = os.path.join(working_dir, "hf_home")
