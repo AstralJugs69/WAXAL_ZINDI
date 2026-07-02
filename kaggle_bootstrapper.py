@@ -35,7 +35,16 @@ def main():
     working_dir = "/kaggle/working"
     project_dir = os.path.join(working_dir, "WAXAL_ZINDI")
 
-    print("=== Step 0: Wiping Old Project & Freeing Space ===")
+    print("=== Step 0: Wiping Disk Cache & Freeing Space ===")
+    # Clear HuggingFace dataset caches to prevent notebook crashes
+    hf_cache_dir = os.path.expanduser("~/.cache/huggingface/datasets")
+    if os.path.exists(hf_cache_dir):
+        print(f"Removing HF dataset cache at: {hf_cache_dir}")
+        try:
+            shutil.rmtree(hf_cache_dir)
+            print("HF dataset cache cleared successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to clear HF cache: {e}")
             
     # Clear old project directory to ensure fresh clone
     if os.path.exists(project_dir):
@@ -84,7 +93,7 @@ def main():
     if tpu_active:
         print("Installing PyTorch/XLA 2.8.0 wheels for TPU VMs (Python 3.12)...")
         run_command_live([
-            "pip", "install", "--upgrade", "numpy>=2.0.0", 
+            "pip", "install", "--upgrade",
             "torch==2.8.0", "torch_xla[tpu]==2.8.0", 
             "-f", "https://storage.googleapis.com/libtpu-releases/index.html"
         ])
