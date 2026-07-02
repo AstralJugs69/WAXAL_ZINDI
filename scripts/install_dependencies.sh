@@ -41,8 +41,8 @@ fi
 
 echo "=== Generating PyTorch Version Constraints ==="
 # Pin pre-installed core packages to prevent pip from backtracking or downloading incompatible wheels.
-# Exclude numpy (handled separately per environment) and pyctcdecode (has numpy<2 pin incompatible with TPU's numpy 2.x).
-pip freeze | grep -E "^(torch|torchaudio|torchvision|intel-openmp|mkl|pyarrow|datasets|transformers|peft|accelerate|bitsandbytes|librosa|soundfile|evaluate|jiwer|pyyaml|tqdm|scikit-learn|optuna|webrtcvad)==" > constraints.txt
+# Exclude pyctcdecode (has numpy<2 pin incompatible with TPU's numpy 2.x — installed separately with --no-deps).
+pip freeze | grep -E "^(torch|torchaudio|torchvision|numpy|intel-openmp|mkl|pyarrow|datasets|transformers|peft|accelerate|bitsandbytes|librosa|soundfile|evaluate|jiwer|pyyaml|tqdm|scikit-learn|optuna|webrtcvad)==" > constraints.txt
 echo "Generated constraints:"
 cat constraints.txt
 
