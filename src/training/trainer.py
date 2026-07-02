@@ -19,6 +19,8 @@ if tpu_vars:
 # Clean up environment variables to force PJRT single-host local device discovery on single TPU VM nodes (like Colab TPU v5e-1)
 # and prevent metadata service query mismatch (expected 4 workers, got 1)
 os.environ["TPU_SKIP_MDS_QUERY"] = "1"
+if os.environ.get("TPU_ACCELERATOR_TYPE") == "v5e-1":
+    os.environ["TPU_CHIPS_PER_HOST_BOUNDS"] = "1,1,1"
 
 for env_var in ["TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID", "TPU_WORKER_ADDRESSES", "TPU_WORKER_PORT"]:
     if env_var in os.environ:
@@ -32,10 +34,10 @@ import numpy as np
 import sys
 
 # Dynamic Numba-NumPy 2.x compatibility resolver
-# Automatically detects and monkey-patches any numpy attributes that numba imports expect but are missing in NumPy 2.x
+# Eagerly imports librosa to trigger all lazy Numba ufunc decorations, patching missing NumPy 2.x attributes on-the-fly.
 while True:
     try:
-        import numba
+        import librosa
         break
     except AttributeError as e:
         msg = str(e)
@@ -54,9 +56,9 @@ while True:
             else:
                 setattr(np, attr, lambda *args, **kwargs: None)
             print(f"[Numba-Compatibility] Dynamically patched missing numpy attribute: {attr}")
-            # Clear partially imported numba modules from cache to force clean retry
+            # Clear partially imported numba/librosa modules from cache to force clean retry
             for k in list(sys.modules.keys()):
-                if k.startswith("numba"):
+                if k.startswith("numba") or k.startswith("librosa"):
                     sys.modules.pop(k)
         else:
             raise e
