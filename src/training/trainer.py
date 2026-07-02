@@ -81,57 +81,32 @@ if not hasattr(np_dtypes, "StringDType"):
     np.dtypes.StringDType = MockStringDType
 
 
-# Class-level monkey-patching for transformers models to align floating-point input dtypes with bfloat16 parameter layers on TPU/bf16.
-# By patching at the class level, we guarantee that all instances (including compiled, wrapped, or copied versions) inherit the fix.
-from transformers import Wav2Vec2ForCTC, WhisperForConditionalGeneration
 
-# 1. Wav2Vec2/MMS CTC model class patch
-original_wav2vec2_forward = Wav2Vec2ForCTC.forward
-def patched_wav2vec2_forward(self, *args, **kwargs):
-    # Resolve target dtype dynamically based on the model's feature extractor layer
-    if hasattr(self, "wav2vec2"):
-        target_dtype = self.wav2vec2.feature_extractor.conv_layers[0].conv.weight.dtype
-    else:
-        target_dtype = next(self.parameters()).dtype
+# Class-level monkey-patching for PyTorch Conv1d, Conv2d, and Linear layers.
+# This forces the PyTorch/XLA compiler to compile explicit runtime cast operators directly before any
+# convolution or linear operations, resolving XLA's auto-type-promotion compiler quirks on TPU/bf16.
+import torch.nn as nn
 
-    # Force bfloat16 on TPU if resolved to float32
-    if os.environ.get("TPU_ACCELERATOR_TYPE") or "xla" in str(self.device):
-        if target_dtype == torch.float32:
-            target_dtype = torch.bfloat16
+original_conv1d_forward = nn.Conv1d.forward
+def patched_conv1d_forward(self, input):
+    if input.dtype != self.weight.dtype:
+        input = input.to(dtype=self.weight.dtype)
+    return original_conv1d_forward(self, input)
+nn.Conv1d.forward = patched_conv1d_forward
 
-    new_args = [
-        arg.to(dtype=target_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
-        for arg in args
-    ]
-    new_kwargs = {
-        k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
-        for k, v in kwargs.items()
-    }
-    return original_wav2vec2_forward(self, *new_args, **new_kwargs)
-Wav2Vec2ForCTC.forward = patched_wav2vec2_forward
+original_conv2d_forward = nn.Conv2d.forward
+def patched_conv2d_forward(self, input):
+    if input.dtype != self.weight.dtype:
+        input = input.to(dtype=self.weight.dtype)
+    return original_conv2d_forward(self, input)
+nn.Conv2d.forward = patched_conv2d_forward
 
-# 2. Whisper Seq2Seq model class patch
-original_whisper_forward = WhisperForConditionalGeneration.forward
-def patched_whisper_forward(self, *args, **kwargs):
-    if hasattr(self, "model") and hasattr(self.model, "encoder") and hasattr(self.model.encoder, "conv1"):
-        target_dtype = self.model.encoder.conv1.weight.dtype
-    else:
-        target_dtype = next(self.parameters()).dtype
-
-    if os.environ.get("TPU_ACCELERATOR_TYPE") or "xla" in str(self.device):
-        if target_dtype == torch.float32:
-            target_dtype = torch.bfloat16
-
-    new_args = [
-        arg.to(dtype=target_dtype) if isinstance(arg, torch.Tensor) and torch.is_floating_point(arg) else arg
-        for arg in args
-    ]
-    new_kwargs = {
-        k: v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) and torch.is_floating_point(v) else v
-        for k, v in kwargs.items()
-    }
-    return original_whisper_forward(self, *new_args, **new_kwargs)
-WhisperForConditionalGeneration.forward = patched_whisper_forward
+original_linear_forward = nn.Linear.forward
+def patched_linear_forward(self, input):
+    if input.dtype != self.weight.dtype:
+        input = input.to(dtype=self.weight.dtype)
+    return original_linear_forward(self, input)
+nn.Linear.forward = patched_linear_forward
 
 import jiwer
 import pandas as pd
