@@ -18,29 +18,48 @@ from src.inference.pipeline import VADSegmenter, LanguageIdentifier
 from src.decoding.ctc_decoder import create_ctc_decoder, decode_logits
 from src.data.dataset import parse_robust_csv, normalize_text
 
-def find_test_audio_dir(search_root="."):
+def find_test_audio_dir(search_roots, test_ids):
     """
-    Recursively searches for a directory containing audio files.
+    Finds the directory containing the test audio files by matching IDs from Test.csv.
     """
-    logger.info(f"Searching for test audio files under: {search_root}")
-    # Common audio extensions
+    logger.info("Scanning for test audio directory...")
+    candidate_dirs = {}
     extensions = (".mp3", ".wav", ".m4a")
-    for root, dirs, files in os.walk(search_root):
-        # Skip output dirs or hidden dirs
-        if "outputs" in root or ".git" in root or "__pycache__" in root:
+    
+    # We will search in the search_roots
+    for search_root in search_roots:
+        if not os.path.exists(search_root):
             continue
-        for f in files:
-            if f.lower().endswith(extensions):
-                logger.info(f"Found audio files directory at: {root}")
-                return root
-    # Also check /kaggle/input if we are on Kaggle
-    if os.path.exists("/kaggle/input"):
-        for root, dirs, files in os.walk("/kaggle/input"):
-            for f in files:
-                if f.lower().endswith(extensions):
-                    logger.info(f"Found audio files directory on Kaggle at: {root}")
-                    return root
-    logger.warning("No audio directory found. Defaulting to current directory.")
+        for root, dirs, files in os.walk(search_root):
+            # Skip hidden or system dirs
+            if ".git" in root or "__pycache__" in root or "outputs" in root:
+                continue
+            # If the directory contains any audio files, count matches
+            audio_files = [f for f in files if f.lower().endswith(extensions)]
+            if audio_files:
+                # Check how many test IDs match files in this directory
+                matched_count = 0
+                # To speed up, we check a sample of 200 IDs
+                sample_ids = test_ids[:200]
+                for audio_id in sample_ids:
+                    found = False
+                    for ext in extensions:
+                        if f"{audio_id}{ext}" in files:
+                            found = True
+                            break
+                    if found:
+                        matched_count += 1
+                if matched_count > 0:
+                    candidate_dirs[root] = matched_count
+                    logger.info(f"Directory {root} matched {matched_count}/{len(sample_ids)} sample test IDs.")
+                    
+    if candidate_dirs:
+        # Return the directory with the highest matches
+        best_dir = max(candidate_dirs, key=candidate_dirs.get)
+        logger.info(f"Selected best audio directory: {best_dir} with {candidate_dirs[best_dir]}/{len(sample_ids)} sample matches.")
+        return best_dir
+        
+    logger.warning("Could not find any directory matching the test IDs. Defaulting to current directory.")
     return "."
 
 def main():
@@ -58,7 +77,11 @@ def main():
     logger.info(f"Loading test CSV from: {test_csv_path}")
     test_df = parse_robust_csv(test_csv_path)
     
-    audio_dir = find_test_audio_dir()
+    # Extract test IDs as a list
+    test_ids = list(test_df["id"].dropna())
+    
+    # Scan current directory and /kaggle/input
+    audio_dir = find_test_audio_dir([".", "/kaggle/input"], test_ids)
     logger.info(f"Test audio directory: {audio_dir}")
     
     # 2. Define target languages
