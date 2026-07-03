@@ -15,9 +15,10 @@ peft:
 
 training:
   learning_rate: 1.0e-4
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 2
+  per_device_train_batch_size: 32      # Scaled up to 32 to leverage 48GB VRAM
+  per_device_eval_batch_size: 16       # Scaled up to 16 for faster evaluation
+  gradient_accumulation_steps: 1       # Automatic alignment will adjust this, target effective batch is 64
+  target_effective_batch: 64           # Increased effective batch size for stable gradients
   num_train_epochs: 30
   fp16: true
   gradient_checkpointing: true
@@ -31,6 +32,7 @@ training:
   metric_for_best_model: "eval_loss"
   greater_is_better: false
   weight_decay: 0.01
+  dataloader_num_workers: 12           # Increased to 12 to leverage 16 CPU cores and prevent GPU starvation
 
 data:
   train_csv: "Train.csv"

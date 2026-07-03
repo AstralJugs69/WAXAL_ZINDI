@@ -586,21 +586,21 @@ def run_training(args, config, is_tpu=False, index=0):
         "group_by_length": train_args.get("group_by_length", False),  # Disabled to prevent LengthGroupedSampler error when dynamic padding is used
         # On GPU, use 2 workers to prefetch and decode audio in background while GPU trains.
         # Override to 0 if dataset is cached in RAM (to avoid duplicating memory heap in subprocesses) or if on TPU.
-        "dataloader_num_workers": 0 if (is_tpu or data_config.get("cache_in_memory", False)) else min(train_args.get("dataloader_num_workers", 2), 2),
+        "dataloader_num_workers": 0 if (is_tpu or data_config.get("cache_in_memory", False)) else train_args.get("dataloader_num_workers", 2),
         "eval_accumulation_steps": 10,  # Periodically clear/accumulate evaluation predictions to CPU
         "remove_unused_columns": False,
         "report_to": ["none"],
         "ddp_find_unused_parameters": True
     }
     
-    # Automatically adjust gradient_accumulation_steps on GPU to maintain a constant effective batch size of 32
+    # Automatically adjust gradient_accumulation_steps on GPU to maintain a constant target effective batch size
     if not is_tpu and torch.cuda.is_available():
         if torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
         else:
             world_size = 1
         per_device_batch = training_kwargs["per_device_train_batch_size"]
-        target_effective_batch = 32
+        target_effective_batch = train_args.get("target_effective_batch", 64)
         accum_steps = max(1, target_effective_batch // (per_device_batch * world_size))
         training_kwargs["gradient_accumulation_steps"] = accum_steps
         if is_main_process:
