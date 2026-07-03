@@ -1,4 +1,7 @@
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["JAX_PLATFORMS"] = "cpu"  # Prevent JAX from locking TPU device on import
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # Prevent XLA client memory pre-allocation
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # Prevent VRAM fragmentation OOMs on 16GB GPUs (P100/T4)
@@ -154,6 +157,39 @@ if torch.cuda.is_available():
     logger.info(f"Device Capability: {torch.cuda.get_device_capability(0)}")
     logger.info(f"=============================")
 
+def preprocess_logits_for_metrics(logits, labels):
+    """
+    Computes argmax on the GPU/TPU device during evaluation to prevent
+    accumulating huge float32 logit tensors in system RAM.
+    """
+    if isinstance(logits, tuple):
+        logits = logits[0]
+    return logits.argmax(dim=-1)
+
+from transformers import TrainerCallback
+class GarbageCollectionCallback(TrainerCallback):
+    """
+    Triggers Python garbage collection, PyArrow memory pool release,
+    and PyTorch CUDA cache clearing at key steps to prevent RAM/VRAM accumulation.
+    """
+    def on_epoch_end(self, args, state, control, **kwargs):
+        import gc
+        import torch
+        import pyarrow as pa
+        gc.collect()
+        pa.default_memory_pool().release_unused()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    def on_evaluate(self, args, state, control, **kwargs):
+        import gc
+        import torch
+        import pyarrow as pa
+        gc.collect()
+        pa.default_memory_pool().release_unused()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 def get_compute_metrics_fn(processor, is_seq2seq):
     """
     Returns the metric computation function for evaluation.
@@ -167,7 +203,9 @@ def get_compute_metrics_fn(processor, is_seq2seq):
         if not is_seq2seq:
             if isinstance(pred_ids, tuple):
                 pred_ids = pred_ids[0]
-            pred_ids = np.argmax(pred_ids, axis=-1)
+            # Only apply argmax if it has not been done already by preprocess_logits_for_metrics
+            if pred_ids.ndim == 3:
+                pred_ids = np.argmax(pred_ids, axis=-1)
             
         # Replace -100 in labels
         label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
@@ -441,6 +479,50 @@ def run_training(args, config, is_tpu=False, index=0):
                     logger.info(f"Train dataset after external corpora merge: {len(train_dataset)} examples")
         except Exception as exc:
             logger.warning(f"External corpora loading failed ({exc}). Continuing with WAXAL data only.")
+            
+    # -----------------------------------------------------------------------
+    # In-memory dataset caching configuration (Optional)
+    # -----------------------------------------------------------------------
+    if data_config.get("cache_in_memory", False):
+        if is_main_process:
+            logger.info("Caching datasets in RAM to optimize training speed...")
+        
+        def cache_audio_fn(example):
+            from src.data.dataset import get_audio_data
+            audio_info = example["audio"]
+            y, sr = get_audio_data(audio_info)
+            if y is not None:
+                # Store the pre-decoded raw waveform and sampling rate
+                example["audio"] = {
+                    "array": y,
+                    "sampling_rate": sr,
+                    "path": audio_info.get("path") if isinstance(audio_info, dict) else getattr(audio_info, "path", "")
+                }
+            return example
+            
+        train_dataset = train_dataset.map(cache_audio_fn, keep_in_memory=True, desc="Caching train dataset in RAM")
+        val_dataset = val_dataset.map(cache_audio_fn, keep_in_memory=True, desc="Caching val dataset in RAM")
+
+    # Clean up intermediate variables and force garbage collection to free CPU RAM
+    if is_main_process:
+        logger.info("Cleaning up intermediate dataframes and variables to free CPU RAM...")
+    
+    # Delete variables
+    if 'train_split_df' in locals():
+        del train_split_df
+    if 'val_split_df' in locals():
+        del val_split_df
+    if 'train_df' in locals():
+        del train_df
+    if 'full_ds' in locals():
+        del full_ds
+    if 'external_ds' in locals():
+        del external_ds
+        
+    import gc
+    import pyarrow as pa
+    gc.collect()
+    pa.default_memory_pool().release_unused()
     
     # JIT warm-up dummy step for TPU to pre-populate compilation cache
     if is_tpu:
@@ -501,7 +583,9 @@ def run_training(args, config, is_tpu=False, index=0):
         "weight_decay": train_args["weight_decay"],
         "group_by_length": train_args.get("group_by_length", False),  # Disabled to prevent LengthGroupedSampler error when dynamic padding is used
         # On GPU, use 2 workers to prefetch and decode audio in background while GPU trains.
-        "dataloader_num_workers": 0 if is_tpu else min(train_args.get("dataloader_num_workers", 2), 2),
+        # Override to 0 if dataset is cached in RAM (to avoid duplicating memory heap in subprocesses) or if on TPU.
+        "dataloader_num_workers": 0 if (is_tpu or data_config.get("cache_in_memory", False)) else min(train_args.get("dataloader_num_workers", 2), 2),
+        "eval_accumulation_steps": 10,  # Periodically clear/accumulate evaluation predictions to CPU
         "remove_unused_columns": False,
         "report_to": ["none"],
         "ddp_find_unused_parameters": True
@@ -540,19 +624,24 @@ def run_training(args, config, is_tpu=False, index=0):
     # 6. Initialize trainer
     from src.utils.observability import ObservabilityCallback
     obs_callback = ObservabilityCallback(output_dir=output_dir)
+    gc_callback = GarbageCollectionCallback()
     
     trainer_class = Seq2SeqTrainer if is_seq2seq else Trainer
     
-    trainer = trainer_class(
-        model=model,
-        args=trainer_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        data_collator=data_collator,
-        compute_metrics=get_compute_metrics_fn(processor, is_seq2seq),
-        processing_class=processor.feature_extractor,  # Required for CTC padding
-        callbacks=[obs_callback]
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": trainer_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": val_dataset,
+        "data_collator": data_collator,
+        "compute_metrics": get_compute_metrics_fn(processor, is_seq2seq),
+        "processing_class": processor.feature_extractor,  # Required for CTC padding
+        "callbacks": [obs_callback, gc_callback]
+    }
+    if not is_seq2seq:
+        trainer_kwargs["preprocess_logits_for_metrics"] = preprocess_logits_for_metrics
+        
+    trainer = trainer_class(**trainer_kwargs)
     
     # 7. Start training
     if is_main_process:
