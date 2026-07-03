@@ -195,6 +195,13 @@ def parse_robust_csv(csv_path):
     logger.info(f"Successfully parsed {len(df)} rows from {csv_path}")
     return df
 
+# Static mapping of language codes to parquet shard counts in google/WaxalNLP
+WAXAL_PARQUET_COUNTS = {
+    "lin": {"train": 8, "validation": 2},
+    "lug": {"train": 5, "validation": 1},
+    "sna": {"train": 9, "validation": 2}
+}
+
 def load_waxal_dataset_clean(lang):
     """
     Loads only train and validation parquet files directly from Hugging Face Hub
@@ -209,13 +216,17 @@ def load_waxal_dataset_clean(lang):
     
     try:
         all_files = list_repo_files(repo_id, repo_type="dataset")
+        lang_dir = f"data/ASR/{lang}"
+        train_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-train-" in f and f.endswith(".parquet")]
+        val_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-validation-" in f and f.endswith(".parquet")]
     except Exception as e:
-        logger.error(f"Failed to list files from Hugging Face: {e}")
-        raise e
-        
-    lang_dir = f"data/ASR/{lang}"
-    train_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-train-" in f and f.endswith(".parquet")]
-    val_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-validation-" in f and f.endswith(".parquet")]
+        logger.warning(f"Failed to list files from Hugging Face Hub online: {e}. Falling back to static file list for offline mode.")
+        if lang in WAXAL_PARQUET_COUNTS:
+            train_patterns = [f"data/ASR/{lang}/{lang}-train-{i:05d}.parquet" for i in range(WAXAL_PARQUET_COUNTS[lang]["train"])]
+            val_patterns = [f"data/ASR/{lang}/{lang}-validation-{i:05d}.parquet" for i in range(WAXAL_PARQUET_COUNTS[lang]["validation"])]
+        else:
+            logger.error(f"No static parquet config for language {lang} and online listing failed.")
+            raise e
     
     if not train_patterns or not val_patterns:
         raise ValueError(f"Could not find train/validation parquet files for language {lang} in {repo_id}")

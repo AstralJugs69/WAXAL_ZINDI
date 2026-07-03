@@ -9,6 +9,11 @@ import librosa
 from tqdm import tqdm
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
+def get_outputs_dir():
+    if os.path.exists("/teamspace/studios/this_studio"):
+        return "/teamspace/studios/this_studio/outputs"
+    return "outputs"
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("inference")
@@ -94,7 +99,7 @@ def main():
     
     for lang in target_languages:
         # Check custom fold checkpoint
-        custom_model_dir = f"outputs/{lang}_mms-300m_fold0/best_model"
+        custom_model_dir = f"{get_outputs_dir()}/{lang}_mms-300m_fold0/best_model"
         if os.path.exists(custom_model_dir):
             logger.info(f"Found custom fine-tuned model for {lang} at {custom_model_dir}")
             model = Wav2Vec2ForCTC.from_pretrained(custom_model_dir)
