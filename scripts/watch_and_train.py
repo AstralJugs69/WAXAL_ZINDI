@@ -17,12 +17,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - [Watcher] - %(leve
 logger = logging.getLogger("watcher")
 
 class TrainingWatcher:
-    def __init__(self, config, fold, target_lang, tpu=False, poll_interval=10):
+    def __init__(self, config, fold, target_lang, tpu=False, poll_interval=10, offline=False):
         self.config = config
         self.fold = fold
         self.target_lang = target_lang
         self.tpu = tpu
         self.poll_interval = poll_interval
+        self.offline = offline
         
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.process = None
@@ -157,8 +158,9 @@ class TrainingWatcher:
         env["HF_HOME"] = "/teamspace/studios/this_studio/hf_home"
         env["HF_HUB_CACHE"] = "/teamspace/studios/this_studio/hf_home/hub"
         env["HF_DATASETS_CACHE"] = "/teamspace/studios/this_studio/hf_home/datasets"
-        env["HF_DATASETS_OFFLINE"] = "1"
-        env["TRANSFORMERS_OFFLINE"] = "1"
+        env["HF_DATASETS_OFFLINE"] = "1" if self.offline else "0"
+        env["TRANSFORMERS_OFFLINE"] = "1" if self.offline else "0"
+        env["HF_HUB_OFFLINE"] = "1" if self.offline else "0"
         env["PYTHONPATH"] = self.project_root
         
         # Build training command
@@ -248,6 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--target_lang", type=str, default="lin", help="Target language (lin, sna, lug)")
     parser.add_argument("--tpu", action="store_true", help="Launch on Google TPU")
     parser.add_argument("--poll_interval", type=int, default=10, help="Polling interval in seconds")
+    parser.add_argument("--offline", action="store_true", help="Launch in completely offline mode")
     args = parser.parse_args()
     
     watcher = TrainingWatcher(
@@ -255,6 +258,7 @@ if __name__ == "__main__":
         fold=args.fold,
         target_lang=args.target_lang,
         tpu=args.tpu,
-        poll_interval=args.poll_interval
+        poll_interval=args.poll_interval,
+        offline=args.offline
     )
     watcher.run()
