@@ -234,9 +234,56 @@ def load_waxal_dataset_clean(lang):
     train_urls = [f"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}" for f in train_patterns]
     val_urls = [f"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}" for f in val_patterns]
     
-    logger.info(f"Loading {len(train_urls)} train files and {len(val_urls)} validation files directly...")
+    # Try to resolve remote URLs to local cached paths to support offline mode
+    local_train_paths = []
+    local_val_paths = []
     
-    ds = load_dataset("parquet", data_files={"train": train_urls, "validation": val_urls})
+    cache_dirs = []
+    hf_datasets_cache = os.environ.get("HF_DATASETS_CACHE")
+    if hf_datasets_cache:
+        cache_dirs.append(os.path.join(hf_datasets_cache, "downloads"))
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        cache_dirs.append(os.path.join(hf_home, "datasets", "downloads"))
+    cache_dirs.append(os.path.expanduser("~/.cache/huggingface/datasets/downloads"))
+    
+    def resolve_url_to_local(url):
+        for cache_dir in cache_dirs:
+            if not os.path.exists(cache_dir):
+                continue
+            for root, _, files in os.walk(cache_dir):
+                for f in files:
+                    if f.endswith(".json"):
+                        json_path = os.path.join(root, f)
+                        try:
+                            with open(json_path, "r", encoding="utf-8") as jf:
+                                content = jf.read()
+                                if url in content:
+                                    data_file_path = json_path[:-5]
+                                    if os.path.exists(data_file_path):
+                                        return data_file_path
+                        except Exception:
+                            pass
+        return None
+
+    logger.info("Checking local datasets cache for offline execution...")
+    for url in train_urls:
+        local_path = resolve_url_to_local(url)
+        if local_path:
+            local_train_paths.append(local_path)
+            
+    for url in val_urls:
+        local_path = resolve_url_to_local(url)
+        if local_path:
+            local_val_paths.append(local_path)
+            
+    if len(local_train_paths) == len(train_urls) and len(local_val_paths) == len(val_urls):
+        logger.info("All files found in local cache. Loading completely offline using local paths.")
+        ds = load_dataset("parquet", data_files={"train": local_train_paths, "validation": local_val_paths})
+    else:
+        logger.warning("Some files not found in local cache. Falling back to remote HF Hub URLs (requires online connection).")
+        logger.info(f"Loading {len(train_urls)} train files and {len(val_urls)} validation files directly...")
+        ds = load_dataset("parquet", data_files={"train": train_urls, "validation": val_urls})
     
     # Cast audio column to Audio feature
     ds = ds.cast_column("audio", Audio(sampling_rate=16000))
