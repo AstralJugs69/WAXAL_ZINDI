@@ -58,9 +58,14 @@ def main():
         print("Notice: HF_TOKEN env var not set. Gated HuggingFace datasets (Common Voice) will be skipped.")
 
     # Configure HuggingFace cache to persist on the working disk drive (preserves datasets/models between runs)
-    hf_home = os.path.join(working_dir, "hf_home")
-    os.environ["HF_HOME"] = hf_home
-    os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
+    hf_home = os.environ.get("HF_HOME")
+    if not hf_home:
+        hf_home = os.path.join(working_dir, "hf_home")
+        os.environ["HF_HOME"] = hf_home
+        os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
+    else:
+        if "HF_DATASETS_CACHE" not in os.environ:
+            os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
     print(f"HuggingFace cache configured to persist at: {hf_home}")
 
     print("=== Step 0: Wiping Old Project & Freeing Space ===")
