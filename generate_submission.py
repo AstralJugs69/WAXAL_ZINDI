@@ -1,205 +1,181 @@
 #!/usr/bin/env python3
-"""
-Submission Generation Script for WAXAL ASR Challenge.
-Runs end-to-end inference on the test set parquet files using the trained adapters and KenLMs.
-"""
 import os
-import argparse
 import glob
+import logging
+import numpy as np
 import pandas as pd
 import torch
+import librosa
 from tqdm import tqdm
-from datasets import load_dataset, Audio
-from huggingface_hub import list_repo_files
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
-from src.inference.pipeline import ProductionASRPipeline
-from src.data.dataset import normalize_text
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("inference")
 
-def get_audio_data(audio_info):
-    """
-    Robustly extracts the raw audio numpy array and sampling rate from HuggingFace Audio column.
-    """
-    if audio_info is None:
-        return None, None
-    if isinstance(audio_info, dict):
-        return audio_info.get("array"), audio_info.get("sampling_rate")
-    if hasattr(audio_info, "array") and hasattr(audio_info, "sampling_rate"):
-        return audio_info.array, audio_info.sampling_rate
-    try:
-        return audio_info["array"], audio_info["sampling_rate"]
-    except Exception:
-        pass
-    return None, None
+# Import helpers from our codebase
+from src.inference.pipeline import VADSegmenter, LanguageIdentifier
+from src.decoding.ctc_decoder import create_ctc_decoder, decode_logits
+from src.data.dataset import parse_robust_csv, normalize_text
 
-def load_waxal_test_dataset(lang):
+def find_test_audio_dir(search_root="."):
     """
-    Loads test parquet files directly from Hugging Face Hub for the specified language.
+    Recursively searches for a directory containing audio files.
     """
-    repo_id = "google/WaxalNLP"
-    print(f"\nRetrieving test files list for {repo_id} ({lang})...")
-    try:
-        all_files = list_repo_files(repo_id, repo_type="dataset")
-    except Exception as e:
-        print(f"Failed to list files from Hugging Face: {e}")
-        return None
-        
-    lang_dir = f"data/ASR/{lang}"
-    test_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-test-" in f and f.endswith(".parquet")]
-    
-    if not test_patterns:
-        print(f"Warning: No test parquet files found for language: {lang}")
-        return None
-        
-    test_urls = [f"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}" for f in test_patterns]
-    print(f"Loading {len(test_urls)} test parquet files...")
-    
-    ds = load_dataset("parquet", data_files={"test": test_urls})["test"]
-    ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-    return ds
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Generate Zindi Submission CSV")
-    parser.add_argument("--outputs_dir", type=str, default="outputs", help="Directory where models and adapters are saved")
-    parser.add_argument("--test_csv", type=str, default="Test.csv", help="Path to Zindi Test.csv file")
-    parser.add_argument("--output_csv", type=str, default="submission.csv", help="Path to output submission.csv")
-    parser.add_argument("--beam_width", type=int, default=128, help="Beam search width for pyctcdecode")
-    parser.add_argument("--alpha", type=float, default=0.5, help="LM weight (alpha) for decoder")
-    parser.add_argument("--beta", type=float, default=1.5, help="Word insertion penalty (beta) for decoder")
-    return parser.parse_args()
+    logger.info(f"Searching for test audio files under: {search_root}")
+    # Common audio extensions
+    extensions = (".mp3", ".wav", ".m4a")
+    for root, dirs, files in os.walk(search_root):
+        # Skip output dirs or hidden dirs
+        if "outputs" in root or ".git" in root or "__pycache__" in root:
+            continue
+        for f in files:
+            if f.lower().endswith(extensions):
+                logger.info(f"Found audio files directory at: {root}")
+                return root
+    # Also check /kaggle/input if we are on Kaggle
+    if os.path.exists("/kaggle/input"):
+        for root, dirs, files in os.walk("/kaggle/input"):
+            for f in files:
+                if f.lower().endswith(extensions):
+                    logger.info(f"Found audio files directory on Kaggle at: {root}")
+                    return root
+    logger.warning("No audio directory found. Defaulting to current directory.")
+    return "."
 
 def main():
-    args = parse_args()
-    
-    # 1. Load Test CSV
-    if not os.path.exists(args.test_csv):
-        # Check parent folder or alternative locations
-        alt_test = os.path.join("..", args.test_csv)
-        if os.path.exists(alt_test):
-            args.test_csv = alt_test
-        else:
-            raise FileNotFoundError(f"Test CSV not found at: {args.test_csv}")
-            
-    print(f"Loading test IDs from {args.test_csv}...")
-    test_df = pd.read_csv(args.test_csv)
-    test_ids = list(test_df["ID"].values)
-    print(f"Total test IDs: {len(test_ids)}")
-
-    # 2. Determine target languages present in Test.csv
-    # Audio IDs usually start with "lug_", "lin_", "sna_"
-    target_langs = set()
-    for tid in test_ids:
-        prefix = tid.split("_")[0]
-        if prefix in ["lin", "lug", "sna"]:
-            target_langs.add(prefix)
-            
-    if not target_langs:
-        # Fallback to all three if prefixes cannot be parsed
-        target_langs = {"lin", "lug", "sna"}
-    target_langs = list(target_langs)
-    print(f"Target languages found in Test.csv: {target_langs}")
-
-    # 3. Locate trained adapters and KenLMs
-    adapter_paths = {}
-    kenlm_paths = {}
-    
-    for lang in target_langs:
-        # Search for outputs folder for the language fold 0
-        lang_dir_pattern = os.path.join(args.outputs_dir, f"{lang}_*_fold*")
-        matching_dirs = glob.glob(lang_dir_pattern)
-        
-        if matching_dirs:
-            # Pick first matching folder, look for best_model
-            best_model_path = os.path.join(matching_dirs[0], "best_model")
-            if os.path.exists(best_model_path):
-                adapter_paths[lang] = best_model_path
-                print(f"Found trained adapter for {lang} at: {best_model_path}")
-                
-                # Check for KenLM
-                lm_path = os.path.join(best_model_path, "lm.bin")
-                if os.path.exists(lm_path):
-                    kenlm_paths[lang] = lm_path
-                    print(f"  Found KenLM model for {lang} at: {lm_path}")
-                else:
-                    # Check for lm_ref file
-                    ref_path = os.path.join(best_model_path, "lm_bin_path.txt")
-                    if os.path.exists(ref_path):
-                        with open(ref_path, "r") as f:
-                            resolved_lm = f.read().strip()
-                        if os.path.exists(resolved_lm):
-                            kenlm_paths[lang] = resolved_lm
-                            print(f"  Found KenLM model for {lang} via ref: {resolved_lm}")
-                            
-    # 4. Initialize Production Routing Pipeline
-    print("\nInitializing Production ASR Pipeline...")
-    pipeline = ProductionASRPipeline(
-        base_model_id="facebook/mms-300m",
-        target_languages=target_langs,
-        adapter_paths=adapter_paths if adapter_paths else None,
-        kenlm_paths=kenlm_paths,
-        beam_width=args.beam_width
-    )
-    
-    # Push model to GPU if available
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    pipeline.model = pipeline.model.to(device)
-    print(f"Model placed on device: {device}")
+    logger.info(f"Using device for inference: {device}")
     
-    # Overwrite default decoder alpha and beta if requested
-    for lang, decoder in pipeline.decoders.items():
-        if decoder is not None:
-            decoder._alpha = args.alpha
-            decoder._beta = args.beta
-
-    # 5. Load and index the test datasets lazily (prevent RAM OOMs)
-    # Map from ID -> (dataset, index_in_dataset)
-    id_to_audio_locator = {}
-    
-    for lang in target_langs:
-        ds = load_waxal_test_dataset(lang)
-        if ds is not None:
-            # Only select the ID column to construct the index map fast without reading raw audio
-            ids_ds = ds.select_columns(["id"])
-            for idx, ex in enumerate(tqdm(ids_ds, desc=f"Indexing {lang} test IDs")):
-                ex_id = ex["id"]
-                id_to_audio_locator[ex_id] = (ds, idx)
-                
-    # 6. Perform batch-free lazy inference
-    predictions = []
-    
-    print("\nRunning test set inference...")
-    for tid in tqdm(test_ids, desc="Transcribing test audios"):
-        if tid in id_to_audio_locator:
-            ds, idx = id_to_audio_locator[tid]
-            try:
-                # Retrieve the full row (triggers lazy audio decoding for this specific sample)
-                example = ds[idx]
-                audio_array, sr = get_audio_data(example["audio"])
-                
-                if audio_array is not None and sr is not None:
-                    transcription, lang_route = pipeline.transcribe(audio_array, sr)
-                    # Normalize predictions for Zindi submission criteria
-                    final_text = normalize_text(transcription)
-                    predictions.append({"ID": tid, "Target": final_text})
-                else:
-                    print(f"\nWarning: Empty audio array for ID: {tid}")
-                    predictions.append({"ID": tid, "Target": ""})
-            except Exception as e:
-                print(f"\nError transcribing {tid}: {e}")
-                predictions.append({"ID": tid, "Target": ""})
-        else:
-            # Fallback if ID is missing from dataset
-            print(f"\nWarning: Test ID {tid} not found in Hugging Face test splits.")
-            predictions.append({"ID": tid, "Target": ""})
+    # 1. Resolve paths
+    test_csv_path = "Test.csv"
+    if not os.path.exists(test_csv_path):
+        # Try finding Test.csv recursively
+        found = glob.glob("**/Test.csv", recursive=True)
+        if found:
+            test_csv_path = found[0]
             
-    # 7. Write to CSV
-    output_df = pd.DataFrame(predictions)
-    # Ensure ID ordering matches original Test.csv exactly
-    output_df = output_df.set_index("ID").reindex(test_ids).reset_index()
+    logger.info(f"Loading test CSV from: {test_csv_path}")
+    test_df = parse_robust_csv(test_csv_path)
     
-    # Save output
-    output_df.to_csv(args.output_csv, index=False)
-    print(f"\nSuccessfully generated submission file: {args.output_csv}")
-    print(output_df.head(10))
+    audio_dir = find_test_audio_dir()
+    logger.info(f"Test audio directory: {audio_dir}")
+    
+    # 2. Define target languages
+    target_languages = ["lin", "sna", "lug"]
+    
+    # Check what custom models we have trained
+    models = {}
+    processors = {}
+    decoders = {}
+    
+    for lang in target_languages:
+        # Check custom fold checkpoint
+        custom_model_dir = f"outputs/{lang}_mms-300m_fold0/best_model"
+        if os.path.exists(custom_model_dir):
+            logger.info(f"Found custom fine-tuned model for {lang} at {custom_model_dir}")
+            model = Wav2Vec2ForCTC.from_pretrained(custom_model_dir)
+            processor = Wav2Vec2Processor.from_pretrained(custom_model_dir)
+            # Re-set target lang to be absolutely sure
+            processor.tokenizer.set_target_lang(lang)
+            
+            # Check KenLM binary
+            lm_path = os.path.join(custom_model_dir, "lm.bin")
+            if os.path.exists(lm_path):
+                logger.info(f"Found compiled KenLM binary for {lang} at {lm_path}")
+                try:
+                    vocab = processor.tokenizer.get_vocab()
+                    decoders[lang] = create_ctc_decoder(vocab_dict=vocab, kenlm_model_path=lm_path)
+                except Exception as e:
+                    logger.warning(f"Could not build KenLM decoder for {lang}: {e}. Falling back to greedy decoding.")
+                    decoders[lang] = None
+            else:
+                logger.warning(f"KenLM binary not found for {lang} at {lm_path}. Using greedy decoding.")
+                decoders[lang] = None
+        else:
+            # Fallback to pre-trained mms-1b-all for this language
+            logger.info(f"No custom model found for {lang}. Falling back to pre-trained facebook/mms-1b-all")
+            model = Wav2Vec2ForCTC.from_pretrained("facebook/mms-1b-all", target_lang=lang, ignore_mismatched_sizes=True)
+            processor = Wav2Vec2Processor.from_pretrained("facebook/mms-1b-all", target_lang=lang)
+            processor.tokenizer.set_target_lang(lang)
+            decoders[lang] = None
+            
+        model = model.to(device)
+        model.eval()
+        models[lang] = model
+        processors[lang] = processor
+        
+    # Load Language Identifier
+    lid = LanguageIdentifier(target_languages=target_languages)
+    vad = VADSegmenter()
+    
+    # 3. Perform Inference
+    predictions = []
+    logger.info(f"Starting inference on {len(test_df)} test files...")
+    
+    for idx, row in tqdm(test_df.iterrows(), total=len(test_df)):
+        audio_id = row["id"]
+        
+        # Resolve audio file path
+        audio_path = None
+        for ext in [".mp3", ".wav", ".m4a", ""]:
+            temp_path = os.path.join(audio_dir, f"{audio_id}{ext}")
+            if os.path.exists(temp_path):
+                audio_path = temp_path
+                break
+                
+        if not audio_path:
+            logger.warning(f"Could not find audio file for ID: {audio_id}. Skipping.")
+            predictions.append({"ID": audio_id, "Target": ""})
+            continue
+            
+        try:
+            # Load audio at 16kHz mono
+            y, sr = librosa.load(audio_path, sr=16000)
+            
+            # Segment audio via VAD to prevent OOM
+            chunks = vad.segment(y, sr=16000)
+            
+            # Run Language Identification on the longest segment
+            longest_chunk = max(chunks, key=len)
+            detected_lang = lid.identify(longest_chunk, sr=16000)
+            
+            # Route to model, processor, and decoder
+            model = models[detected_lang]
+            processor = processors[detected_lang]
+            decoder = decoders[detected_lang]
+            
+            transcriptions = []
+            for chunk in chunks:
+                inputs = processor(chunk, sampling_rate=16000, return_tensors="pt")
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    logits = model(**inputs).logits[0].cpu().numpy()
+                    
+                # Decode logits
+                if decoder is not None:
+                    chunk_text = decode_logits(decoder, logits, beam_width=128)
+                else:
+                    # Greedy decoding fallback
+                    pred_ids = np.argmax(logits, axis=-1)
+                    chunk_text = processor.decode(pred_ids)
+                    
+                normalized_chunk = normalize_text(chunk_text)
+                if normalized_chunk:
+                    transcriptions.append(normalized_chunk)
+                    
+            final_text = " ".join(transcriptions)
+            predictions.append({"ID": audio_id, "Target": final_text})
+        except Exception as e:
+            logger.error(f"Failed to transcribe {audio_id}: {e}")
+            predictions.append({"ID": audio_id, "Target": ""})
+            
+    # 4. Save to submission CSV
+    submission_df = pd.DataFrame(predictions)
+    # Ensure correct column headers as per SampleSubmission.csv
+    submission_df.to_csv("submission.csv", index=False)
+    logger.info("Successfully generated submission.csv!")
 
 if __name__ == "__main__":
     main()
