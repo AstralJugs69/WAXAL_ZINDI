@@ -329,11 +329,12 @@ def run_training(args, config, is_tpu=False, index=0):
                 continue
             split_ds = full_ds[split_name]
             # Restrict format to ID columns to avoid decoding audio during filtering
-            split_ds_formatted = split_ds.with_format(columns=["id", "client_id"])
+            cols_to_format = [c for c in ["id", "client_id", "speaker_id"] if c in split_ds.column_names]
+            split_ds_formatted = split_ds.with_format(columns=cols_to_format)
             
             # Vectorized filter — runs in Arrow/C++, much faster than Python enumerate loop
             split_ds_filtered = split_ds_formatted.filter(
-                lambda batch: [ex_id in id_set for ex_id in (batch.get("id") or batch.get("client_id"))],
+                lambda batch: [ex_id in id_set for ex_id in (batch.get("id") or batch.get("client_id") or batch.get("speaker_id"))],
                 batched=True,
                 batch_size=1000,
                 desc=f"Matching IDs in {split_name}"
@@ -346,11 +347,12 @@ def run_training(args, config, is_tpu=False, index=0):
             
         concat_ds = concatenate_datasets(selected_ds_list)
         # Keep format restricted to ID columns during mapping to avoid audio decoding
-        concat_ds_formatted = concat_ds.with_format(columns=["id", "client_id"])
+        cols_to_format = [c for c in ["id", "client_id", "speaker_id"] if c in concat_ds.column_names]
+        concat_ds_formatted = concat_ds.with_format(columns=cols_to_format)
         
         # Map labels by ID using a fast batched map
         def add_labels(batch):
-            ids = batch.get("id") or batch.get("client_id")
+            ids = batch.get("id") or batch.get("client_id") or batch.get("speaker_id")
             batch["normalized_transcription"] = [id_to_label.get(ex_id, "") for ex_id in ids]
             return batch
         
@@ -762,7 +764,7 @@ def pre_filter_and_save_splits(args, config):
         if split_name in full_ds:
             filtered_ds = full_ds[split_name].filter(hf_filter_fn, desc=f"Pre-filtering {split_name} split")
             for ex in filtered_ds:
-                ex_id = ex.get("id") or ex.get("client_id")
+                ex_id = ex.get("id") or ex.get("client_id") or ex.get("speaker_id")
                 if ex_id:
                     valid_ids.add(ex_id)
                     
