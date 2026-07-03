@@ -241,13 +241,29 @@ def load_waxal_dataset_clean(lang):
     cache_dirs = []
     hf_datasets_cache = os.environ.get("HF_DATASETS_CACHE")
     if hf_datasets_cache:
+        cache_dirs.append(hf_datasets_cache)
         cache_dirs.append(os.path.join(hf_datasets_cache, "downloads"))
     hf_home = os.environ.get("HF_HOME")
     if hf_home:
+        cache_dirs.append(hf_home)
         cache_dirs.append(os.path.join(hf_home, "datasets", "downloads"))
+    cache_dirs.append(os.path.expanduser("~/.cache/huggingface"))
     cache_dirs.append(os.path.expanduser("~/.cache/huggingface/datasets/downloads"))
     
+    # Debug log directories contents count
+    for c_dir in cache_dirs:
+        if os.path.exists(c_dir):
+            try:
+                f_count = 0
+                for r, d, files in os.walk(c_dir):
+                    f_count += len(files)
+                logger.info(f"Cache telemetry: Directory '{c_dir}' exists with {f_count} total files.")
+            except Exception:
+                pass
+                
     def resolve_url_to_local(url):
+        basename = os.path.basename(url)
+        escaped_url = url.replace("/", "\\/")
         for cache_dir in cache_dirs:
             if not os.path.exists(cache_dir):
                 continue
@@ -258,7 +274,8 @@ def load_waxal_dataset_clean(lang):
                         try:
                             with open(json_path, "r", encoding="utf-8") as jf:
                                 content = jf.read()
-                                if url in content:
+                                # Match by full URL, escaped URL, or basename of the shard
+                                if url in content or escaped_url in content or basename in content:
                                     data_file_path = json_path[:-5]
                                     if os.path.exists(data_file_path):
                                         return data_file_path
