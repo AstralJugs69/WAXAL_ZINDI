@@ -677,7 +677,15 @@ def run_training(args, config, is_tpu=False, index=0):
         # -------------------------------------------------------------------
         try:
             from src.decoding.kenlm_utils import build_language_model
-            all_transcripts = list(train_split_df["normalized_transcription"].dropna())
+            import pandas as pd
+            train_path = f"outputs/temp_train_fold{args.fold}.csv"
+            if os.path.exists(train_path):
+                logger.info(f"Loading transcripts from temporary CSV for KenLM: {train_path}")
+                train_split_df_temp = pd.read_csv(train_path)
+                all_transcripts = list(train_split_df_temp["normalized_transcription"].dropna())
+            else:
+                all_transcripts = list(train_split_df["normalized_transcription"].dropna())
+                
             lm_output_dir = f"{output_dir}/best_model"
             logger.info(f"Building KenLM language model from {len(all_transcripts)} training transcripts...")
             lm_bin_path = build_language_model(
