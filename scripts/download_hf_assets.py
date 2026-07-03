@@ -77,6 +77,28 @@ def main():
             except Exception as e:
                 logger.error(f"Failed {path} [{name}] split {split}: {e}")
 
+    # 3. Download google/WaxalNLP dataset for WAXAL target languages
+    logger.info("=== Downloading google/WaxalNLP Parquet Files ===")
+    try:
+        from huggingface_hub import list_repo_files
+        repo_id = "google/WaxalNLP"
+        all_files = list_repo_files(repo_id, repo_type="dataset", token=token)
+        for lang in ["lin", "lug", "sna"]:
+            lang_dir = f"data/ASR/{lang}"
+            train_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-train-" in f and f.endswith(".parquet")]
+            val_patterns = [f for f in all_files if f.startswith(lang_dir) and f"{lang}-validation-" in f and f.endswith(".parquet")]
+            
+            if train_patterns and val_patterns:
+                train_urls = [f"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}" for f in train_patterns]
+                val_urls = [f"https://huggingface.co/datasets/{repo_id}/resolve/main/{f}" for f in val_patterns]
+                logger.info(f"Downloading google/WaxalNLP files for {lang} ({len(train_urls)} train, {len(val_urls)} val)...")
+                load_dataset("parquet", data_files={"train": train_urls, "validation": val_urls}, token=token)
+                logger.info(f"Successfully cached google/WaxalNLP for {lang}")
+            else:
+                logger.warning(f"No parquet files found for {lang} in {repo_id}")
+    except Exception as e:
+        logger.error(f"Failed to pre-download google/WaxalNLP: {e}")
+
     logger.info("=== All downloads completed ===")
 
 if __name__ == "__main__":
