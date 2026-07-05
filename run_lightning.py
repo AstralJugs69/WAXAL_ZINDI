@@ -14,14 +14,12 @@ import subprocess
 # and triggering GitHub's Push Protection policies.
 def extract_hf_token():
     token = os.environ.get("HF_TOKEN")
-    args = sys.argv[1:]
     
-    # Check for --hf_token in arguments
-    if "--hf_token" in args:
-        idx = args.index("--hf_token")
-        if idx + 1 < len(args):
-            token = args[idx + 1]
-            # Remove --hf_token <token> from argv so it doesn't get forwarded
+    # Check for --hf_token in sys.argv directly to avoid index mismatch
+    if "--hf_token" in sys.argv:
+        idx = sys.argv.index("--hf_token")
+        if idx + 1 < len(sys.argv):
+            token = sys.argv[idx + 1]
             sys.argv.pop(idx + 1)
             sys.argv.pop(idx)
             
@@ -66,19 +64,18 @@ def setup_kaggle_credentials():
     username = os.environ.get("KAGGLE_USERNAME")
     key = os.environ.get("KAGGLE_KEY")
     
-    args = sys.argv[1:]
-    if "--kaggle_username" in args:
-        idx = args.index("--kaggle_username")
-        if idx + 1 < len(args):
-            username = args[idx + 1]
+    # Use sys.argv directly to prevent index shifts
+    if "--kaggle_username" in sys.argv:
+        idx = sys.argv.index("--kaggle_username")
+        if idx + 1 < len(sys.argv):
+            username = sys.argv[idx + 1]
             sys.argv.pop(idx + 1)
             sys.argv.pop(idx)
             
-    args = sys.argv[1:]
-    if "--kaggle_key" in args:
-        idx = args.index("--kaggle_key")
-        if idx + 1 < len(args):
-            key = args[idx + 1]
+    if "--kaggle_key" in sys.argv:
+        idx = sys.argv.index("--kaggle_key")
+        if idx + 1 < len(sys.argv):
+            key = sys.argv[idx + 1]
             sys.argv.pop(idx + 1)
             sys.argv.pop(idx)
             
