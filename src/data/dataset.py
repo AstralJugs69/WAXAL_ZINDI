@@ -294,13 +294,14 @@ def load_waxal_dataset_clean(lang):
         if local_path:
             local_val_paths.append(local_path)
             
+    token = os.environ.get("HF_TOKEN")
     if len(local_train_paths) == len(train_urls) and len(local_val_paths) == len(val_urls):
         logger.info("All files found in local cache. Loading completely offline using local paths.")
-        ds = load_dataset("parquet", data_files={"train": local_train_paths, "validation": local_val_paths})
+        ds = load_dataset("parquet", data_files={"train": local_train_paths, "validation": local_val_paths}, token=token)
     else:
         logger.warning("Some files not found in local cache. Falling back to remote HF Hub URLs (requires online connection).")
         logger.info(f"Loading {len(train_urls)} train files and {len(val_urls)} validation files directly...")
-        ds = load_dataset("parquet", data_files={"train": train_urls, "validation": val_urls})
+        ds = load_dataset("parquet", data_files={"train": train_urls, "validation": val_urls}, token=token)
     
     # Cast audio column to Audio feature
     ds = ds.cast_column("audio", Audio(sampling_rate=16000))

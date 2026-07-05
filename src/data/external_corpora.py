@@ -100,7 +100,7 @@ def load_external_corpus(lang: str, sources: list = None) -> object:
 
         try:
             logger.info(f"Loading external corpus: {dataset_id} [{config_name}] for '{lang}'...")
-            ds = load_dataset(dataset_id, config_name, trust_remote_code=True)
+            ds = load_dataset(dataset_id, config_name, trust_remote_code=True, token=os.environ.get("HF_TOKEN"))
 
             # Collect all requested splits
             split_parts = []

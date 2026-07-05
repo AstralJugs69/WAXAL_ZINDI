@@ -6,6 +6,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"  # Prevent JAX from locking TPU device on im
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"  # Prevent XLA client memory pre-allocation
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # Prevent VRAM fragmentation OOMs on 16GB GPUs (P100/T4)
 os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"  # Use high performance transfer with Xet for HuggingFace datasets
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"  # Enable fast Rust-based HF downloader backend
 
 # Configure HuggingFace cache directories dynamically to persist on the working disk drive
 working_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "/content"

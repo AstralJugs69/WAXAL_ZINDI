@@ -141,6 +141,7 @@ def main():
         
     os.environ["HF_HOME"] = hf_home
     os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     print(f"HuggingFace cache configured to persist at: {hf_home}")
 
     print("=== Step 0: Wiping Old Project & Freeing Space ===")

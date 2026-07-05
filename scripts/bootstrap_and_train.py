@@ -203,6 +203,7 @@ def start_training_subprocess(args):
     env["HF_HOME"] = hf_home
     env["HF_HUB_CACHE"] = os.path.join(hf_home, "hub")
     env["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
+    env["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     env["PYTHONPATH"] = "."
     
     tpu_active = args.tpu or os.environ.get("TPU_NAME") or os.environ.get("TPU_ACCELERATOR_TYPE") or os.path.exists("/usr/share/tpu-support")
