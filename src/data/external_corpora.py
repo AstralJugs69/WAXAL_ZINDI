@@ -140,6 +140,7 @@ def load_external_corpus(lang: str, sources: list = None) -> object:
                 batched=True,
                 batch_size=1000,
                 desc=f"Normalising {source}/{lang}",
+                decode_audio=False,
             )
             global_idx += len(combined)
 
@@ -151,9 +152,10 @@ def load_external_corpus(lang: str, sources: list = None) -> object:
             # Resample audio to 16 kHz to match WAXAL
             combined = combined.cast_column("audio", Audio(sampling_rate=16000))
 
-            # Drop rows with empty transcription (silent/bad files)
+            # Drop rows with empty transcription (silent/bad files) without decoding audio
             combined = combined.filter(
-                lambda ex: bool(ex["normalized_transcription"].strip()),
+                lambda text: bool(text and text.strip()),
+                input_columns=["normalized_transcription"],
                 desc=f"Removing empty transcriptions in {source}",
             )
 

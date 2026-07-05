@@ -8,6 +8,21 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"  # Prevent VRAM fr
 os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"  # Use high performance transfer with Xet for HuggingFace datasets
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"  # Enable fast Rust-based HF downloader backend
 
+# Monkey-patch jax to avoid AttributeError: module 'jax' has no attribute 'named_scope' in torch_xla profiler
+try:
+    import jax
+    if not hasattr(jax, "named_scope"):
+        class DummyNamedScope:
+            def __init__(self, name, *args, **kwargs):
+                self.name = name
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+        jax.named_scope = DummyNamedScope
+except Exception:
+    pass
+
 # Configure HuggingFace cache directories dynamically to persist on the working disk drive
 working_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "/content"
 hf_home = os.environ.get("HF_HOME", os.path.join(working_dir, "hf_home"))
@@ -463,28 +478,8 @@ def run_training(args, config, is_tpu=False, index=0):
                 logger.info(f"Loading external corpora for '{args.target_lang}': {ext_sources}")
             external_ds = load_external_corpus(args.target_lang, sources=ext_sources)
             if external_ds is not None and len(external_ds) > 0:
-                # Define filter function for external corpus to align with WAXAL duration/WPS limits
-                def ext_filter_fn(example):
-                    from src.data.dataset import get_audio_data
-                    audio_info = example["audio"]
-                    array, sr = get_audio_data(audio_info)
-                    if array is None or sr is None:
-                        return False
-                    duration = len(array) / sr
-                    if duration < data_config["duration_min"] or duration > data_config["duration_max"]:
-                        return False
-                    transcript = example.get("normalized_transcription") or example.get("transcription") or ""
-                    word_count = len(transcript.split())
-                    if duration > 0:
-                        wps = word_count / duration
-                        if wps < data_config["wps_min"] or wps > data_config["wps_max"]:
-                            return False
-                    return True
-                
-                if is_main_process:
-                    logger.info("Applying duration/WPS filter to external corpus...")
-                external_ds = external_ds.filter(ext_filter_fn, desc="Filtering external corpus by duration/WPS")
-                
+                # We skip duration/WPS filtering on clean external corpora (Common Voice/FLEURS)
+                # to prevent pre-decoding thousands of audio files, which causes massive I/O lag.
                 train_dataset = _ext_cat([train_dataset, external_ds])
                 if is_main_process:
                     logger.info(f"Train dataset after external corpora merge: {len(train_dataset)} examples")
