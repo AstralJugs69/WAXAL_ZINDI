@@ -654,8 +654,11 @@ def run_training(args, config, is_tpu=False, index=0):
         num_cores = multiprocessing.cpu_count()
         total_ram_gb = psutil.virtual_memory().total / (1024**3)
         
-        # Override to 0 if dataset is cached in RAM AND CPU RAM is low (<40GB) to avoid OOM
-        if data_config.get("cache_in_memory", False) and total_ram_gb < 40.0:
+        # When dataset is cached in RAM, we MUST set num_workers = 0.
+        # This is because python's reference counting on the cached dict/objects triggers
+        # Copy-on-Write (COW) page faults in child worker processes, causing massive CPU memory inflation
+        # and blocking training speed down to 18s/iteration.
+        if data_config.get("cache_in_memory", False):
             default_workers = 0
             prefetch_factor = None
         else:
