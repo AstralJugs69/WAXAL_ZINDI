@@ -226,8 +226,8 @@ def main():
     else:
         print("Warning: HF_TOKEN not set. Online dataset loading may fail for gated datasets.")
     
-    # Set default HF home to /tmp/hf_home for Lightning AI
-    hf_home = "/tmp/hf_home"
+    # Set default HF home to /teamspace/studios/this_studio/hf_home for Lightning AI to persist across restarts
+    hf_home = "/teamspace/studios/this_studio/hf_home"
     os.environ["HF_HOME"] = hf_home
     os.environ["HF_HUB_CACHE"] = os.path.join(hf_home, "hub")
     os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")

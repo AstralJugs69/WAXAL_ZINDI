@@ -193,12 +193,14 @@ def extract_cache_chunks(chunks_dir, hf_home_dir):
 
 def start_training_subprocess(args):
     env = os.environ.copy()
-    if os.path.exists("/kaggle/temp"):
-        hf_home = "/kaggle/temp/hf_home"
-    elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
-        hf_home = "/tmp/hf_home"
-    else:
-        hf_home = "./hf_home"
+    hf_home = os.environ.get("HF_HOME")
+    if not hf_home:
+        if os.path.exists("/kaggle/temp"):
+            hf_home = "/kaggle/temp/hf_home"
+        elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
+            hf_home = "/tmp/hf_home"
+        else:
+            hf_home = "./hf_home"
         
     env["HF_HOME"] = hf_home
     env["HF_HUB_CACHE"] = os.path.join(hf_home, "hub")
@@ -256,12 +258,14 @@ def main():
     bootstrap_environment(args.tpu)
     
     # 3. Extract HuggingFace cache chunks if available
-    if os.path.exists("/kaggle/temp"):
-        hf_home = "/kaggle/temp/hf_home"
-    elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
-        hf_home = "/tmp/hf_home"
-    else:
-        hf_home = "./hf_home"
+    hf_home = os.environ.get("HF_HOME")
+    if not hf_home:
+        if os.path.exists("/kaggle/temp"):
+            hf_home = "/kaggle/temp/hf_home"
+        elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
+            hf_home = "/tmp/hf_home"
+        else:
+            hf_home = "./hf_home"
         
     chunks_dir = find_cache_chunks_dir()
     if chunks_dir:
