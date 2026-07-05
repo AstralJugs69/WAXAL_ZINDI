@@ -362,6 +362,7 @@ def run_training(args, config, is_tpu=False, index=0):
     model_family = config.get("model_family", "mms")
     is_gemma = (model_family == "gemma")
     is_seq2seq = "whisper" in model_id.lower()
+    output_dir = f"{get_outputs_dir()}/{args.target_lang}_{model_id.split('/')[-1]}_fold{args.fold}"
 
     # Determine whether this process is the master (rank-0) process.
     # In DDP mode (torchrun), LOCAL_RANK is set by the launcher.
@@ -547,12 +548,27 @@ def run_training(args, config, is_tpu=False, index=0):
     if is_gemma:
         import timm
         from src.models.gemma_model import load_processor_for_gemma, get_gemma_model
-        processor = load_processor_for_gemma(model_id=model_id)
-        model = get_gemma_model(
-            model_id=model_id,
-            torch_dtype=torch.bfloat16,
-            device_map="auto" if not is_tpu else None
-        )
+        
+        # Warm start from previously saved best_model weights if available
+        checkpoint_dir = f"{output_dir}/best_model"
+        if os.path.exists(checkpoint_dir) and os.path.exists(f"{checkpoint_dir}/adapter_config.json"):
+            if is_main_process:
+                logger.info(f"Warm-starting Gemma adapter weights from existing checkpoint: {checkpoint_dir}")
+            processor = load_processor_for_gemma(model_id=checkpoint_dir)
+            base_model = get_gemma_model(
+                model_id=model_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto" if not is_tpu else None
+            )
+            from peft import PeftModel
+            model = PeftModel.from_pretrained(base_model, checkpoint_dir, is_trainable=True)
+        else:
+            processor = load_processor_for_gemma(model_id=model_id)
+            model = get_gemma_model(
+                model_id=model_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto" if not is_tpu else None
+            )
         if is_tpu:
             model = model.to(device)
     elif is_seq2seq:
@@ -871,15 +887,21 @@ def run_training(args, config, is_tpu=False, index=0):
         total_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
         
         orig_batch_size = training_kwargs["per_device_train_batch_size"]
-        if total_memory_gb < 18.0:
-            # 16GB GPU (T4, P100) -> safe batch size is 8
-            target_batch_size = min(orig_batch_size, 8)
-        elif total_memory_gb < 30.0:
-            # 24GB GPU (L4, RTX 3090/4090) -> safe batch size is 16
-            target_batch_size = min(orig_batch_size, 16)
+        if is_gemma:
+            if total_memory_gb < 18.0:
+                target_batch_size = 2
+            elif total_memory_gb < 30.0:
+                target_batch_size = 4
+            else:
+                # 48GB VRAM (L40S) -> 16 is optimal and safe for Gemma 3n
+                target_batch_size = 16
         else:
-            # 40GB+ GPU (A100, L40S, H100) -> scale to target batch size 64 as requested (gradient accumulation is disabled)
-            target_batch_size = min(orig_batch_size, 64)
+            if total_memory_gb < 18.0:
+                target_batch_size = 8
+            elif total_memory_gb < 30.0:
+                target_batch_size = 16
+            else:
+                target_batch_size = 64
             
         training_kwargs["per_device_train_batch_size"] = target_batch_size
         # Also scale eval batch size
@@ -982,7 +1004,26 @@ def run_training(args, config, is_tpu=False, index=0):
     # Flush GPU memory before starting the training loop
     if not is_tpu and torch.cuda.is_available():
         torch.cuda.empty_cache()
-    trainer.train()
+        
+    # Check for existing training checkpoints to resume from
+    resume_checkpoint = None
+    if os.path.exists(output_dir):
+        checkpoints = [
+            os.path.join(output_dir, d) 
+            for d in os.listdir(output_dir) 
+            if d.startswith("checkpoint-") and os.path.isdir(os.path.join(output_dir, d))
+        ]
+        if checkpoints:
+            try:
+                # Sort checkpoints by step number
+                checkpoints.sort(key=lambda x: int(x.split("-")[-1]))
+                resume_checkpoint = checkpoints[-1]
+                if is_main_process:
+                    logger.info(f"Existing checkpoint detected. Resuming training from: {resume_checkpoint}")
+            except Exception as e:
+                logger.warning(f"Could not parse checkpoint paths: {e}")
+                
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
     
     # Save the best model — rank 0 only to avoid concurrent file writes
     if is_tpu:
