@@ -38,10 +38,14 @@ peft:
     - "o_proj"
 
 data:
+  train_csv: "Train.csv"
+  test_csv: "Test.csv"
   dataset_id: "google/WaxalNLP"
   system_message: "You are an assistant that transcribes speech accurately."
   user_message: "Please transcribe this audio."
   duration_min: 1.5
   duration_max: 20.0
+  wps_min: 1.0
+  wps_max: 8.0
   k_folds: 5
   use_external_corpora: false
