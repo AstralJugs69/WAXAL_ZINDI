@@ -39,15 +39,22 @@ KAGGLE_KEY=${5:-$KAGGLE_KEY}
 
 # 3. Train all three languages sequentially (Lingala, Shona, Luganda)
 for LANG in lin sna lug; do
+    if [ "$LANG" = "lin" ]; then
+        STEPS=800
+    else
+        STEPS=700
+    fi
+    
     echo ""
     echo "=========================================================="
-    echo "🚀 Starting Training for Language: $LANG (Fold $FOLD) 🚀"
+    echo "🚀 Starting Training for Language: $LANG ($STEPS steps, Fold $FOLD) 🚀"
     echo "=========================================================="
     
     python run_lightning.py \
       --config "$CONFIG" \
       --fold "$FOLD" \
       --target_lang "$LANG" \
+      --max_steps "$STEPS" \
       --git_poll_interval 5 \
       --hf_token "$HF_TOKEN" \
       --kaggle_username "$KAGGLE_USER" \

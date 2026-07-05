@@ -23,6 +23,7 @@ def parse_args():
     parser.add_argument("--target_lang", type=str, default="lin", help="Target language (lin, sna, lug)")
     parser.add_argument("--tpu", action="store_true", help="Launch training on Google TPU VM cores")
     parser.add_argument("--git_poll_interval", type=int, default=30, help="Git polling interval in seconds (0 to disable)")
+    parser.add_argument("--max_steps", type=int, default=-1, help="Override training max steps")
     return parser.parse_args()
 
 def check_and_update_git():
@@ -218,6 +219,8 @@ def start_training_subprocess(args):
             "--target_lang", args.target_lang,
             "--tpu"
         ]
+        if args.max_steps > 0:
+            cmd.extend(["--max_steps", str(args.max_steps)])
     else:
         if shutil.which("bash"):
             cmd = [
@@ -226,6 +229,8 @@ def start_training_subprocess(args):
                 str(args.fold),
                 args.target_lang
             ]
+            if args.max_steps > 0:
+                cmd.extend(["--max_steps", str(args.max_steps)])
         else:
             cmd = [
                 sys.executable, "src/training/trainer.py",
@@ -233,6 +238,8 @@ def start_training_subprocess(args):
                 "--fold", str(args.fold),
                 "--target_lang", args.target_lang
             ]
+            if args.max_steps > 0:
+                cmd.extend(["--max_steps", str(args.max_steps)])
             
     print(f"Launching training subprocess: {' '.join(cmd)}")
     

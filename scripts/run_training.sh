@@ -23,7 +23,7 @@ if [ -n "$TPU_FLAG" ]; then
         --config "$CONFIG" \
         --fold "$FOLD" \
         --target_lang "$LANG" \
-        $TPU_FLAG
+        "${@:4}"
 else
     # GPU path — detect how many CUDA GPUs are visible and use torchrun for DDP
     N_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
@@ -37,12 +37,14 @@ else
             src/training/trainer.py \
             --config "$CONFIG" \
             --fold "$FOLD" \
-            --target_lang "$LANG"
+            --target_lang "$LANG" \
+            "${@:4}"
     else
         echo "Single GPU detected — launching standard python..."
         python src/training/trainer.py \
             --config "$CONFIG" \
             --fold "$FOLD" \
-            --target_lang "$LANG"
+            --target_lang "$LANG" \
+            "${@:4}"
     fi
 fi
