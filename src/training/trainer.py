@@ -542,25 +542,48 @@ def run_training(args, config, is_tpu=False, index=0):
     # -----------------------------------------------------------------------
     # In-memory dataset caching configuration (Optional)
     # -----------------------------------------------------------------------
+    audio_cache = {}
     if data_config.get("cache_in_memory", False):
         if is_main_process:
-            logger.info("Caching datasets in RAM to optimize training speed...")
-        
-        def cache_audio_fn(example):
-            from src.data.dataset import get_audio_data
-            audio_info = example["audio"]
-            y, sr = get_audio_data(audio_info)
-            if y is not None:
-                # Store the pre-decoded raw waveform and sampling rate
-                example["audio"] = {
-                    "array": y,
-                    "sampling_rate": sr,
-                    "path": audio_info.get("path") if isinstance(audio_info, dict) else getattr(audio_info, "path", "")
-                }
-            return example
+            logger.info("Pre-decoding and caching all audio files in RAM in parallel...")
             
-        train_dataset = train_dataset.map(cache_audio_fn, keep_in_memory=True, desc="Caching train dataset in RAM")
-        val_dataset = val_dataset.map(cache_audio_fn, keep_in_memory=True, desc="Caching val dataset in RAM")
+        from src.data.dataset import get_audio_data
+        from multiprocessing.pool import ThreadPool
+        import multiprocessing
+        
+        # Gather all unique examples to cache
+        examples_to_cache = []
+        seen_paths = set()
+        
+        for dataset in [train_dataset, val_dataset]:
+            for example in dataset:
+                audio_info = example.get("audio")
+                if not audio_info:
+                    continue
+                path = audio_info.get("path") if isinstance(audio_info, dict) else getattr(audio_info, "path", "")
+                if path and path not in seen_paths:
+                    seen_paths.add(path)
+                    examples_to_cache.append((path, audio_info))
+                    
+        def load_single_audio(item):
+            path, audio_info = item
+            try:
+                y, sr = get_audio_data(audio_info)
+                return path, y, sr
+            except Exception:
+                return path, None, None
+                
+        num_cores = multiprocessing.cpu_count()
+        # Parallel load using ThreadPool to saturate CPU and speed up startup
+        with ThreadPool(num_cores) as pool:
+            results = pool.map(load_single_audio, examples_to_cache)
+            
+        for path, y, sr in results:
+            if y is not None:
+                audio_cache[path] = (y, sr)
+                
+        if is_main_process:
+            logger.info(f"Successfully cached {len(audio_cache)} decoded audio arrays in RAM.")
 
     # Clean up intermediate variables and force garbage collection to free CPU RAM
     if is_main_process:
@@ -611,7 +634,8 @@ def run_training(args, config, is_tpu=False, index=0):
         augmentator=augmentator,
         is_seq2seq=is_seq2seq,
         sampling_rate=16000,
-        static_buckets=is_tpu
+        static_buckets=is_tpu,
+        audio_cache=audio_cache
     )
     
     # 5. Training arguments
@@ -668,6 +692,7 @@ def run_training(args, config, is_tpu=False, index=0):
         "dataloader_num_workers": default_workers,
         "dataloader_prefetch_factor": prefetch_factor,
         "dataloader_pin_memory": True,
+        "dataloader_persistent_workers": True if default_workers > 0 else False,
         "eval_accumulation_steps": 10,  # Periodically clear/accumulate evaluation predictions to CPU
         "remove_unused_columns": False,
         "report_to": ["none"],

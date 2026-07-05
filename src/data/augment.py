@@ -153,13 +153,15 @@ class ASRDataCollatorWithPadding:
         augmentator: DynamicAugmentator = None,
         is_seq2seq: bool = False,
         sampling_rate: int = 16000,
-        static_buckets: bool = False
+        static_buckets: bool = False,
+        audio_cache: dict = None
     ):
         self.processor = processor
         self.augmentator = augmentator
         self.is_seq2seq = is_seq2seq
         self.sampling_rate = sampling_rate
         self.static_buckets = static_buckets
+        self.audio_cache = audio_cache or {}
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         from src.data.dataset import get_audio_data
@@ -173,7 +175,12 @@ class ASRDataCollatorWithPadding:
         if self.static_buckets and not self.is_seq2seq:
             lengths = []
             for feature in features:
-                arr, _ = get_audio_data(feature["audio"])
+                audio_info = feature["audio"]
+                path = audio_info.get("path") if isinstance(audio_info, dict) else getattr(audio_info, "path", "")
+                if path in self.audio_cache:
+                    arr, _ = self.audio_cache[path]
+                else:
+                    arr, _ = get_audio_data(audio_info)
                 if arr is not None:
                     lengths.append(len(arr))
             max_len = max(lengths) if lengths else 0
@@ -188,7 +195,11 @@ class ASRDataCollatorWithPadding:
 
         for feature in features:
             audio_info = feature["audio"]
-            y, sr = get_audio_data(audio_info)
+            path = audio_info.get("path") if isinstance(audio_info, dict) else getattr(audio_info, "path", "")
+            if path in self.audio_cache:
+                y, sr = self.audio_cache[path]
+            else:
+                y, sr = get_audio_data(audio_info)
             if y is None or sr is None:
                 continue
             
