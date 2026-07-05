@@ -623,18 +623,25 @@ def run_training(args, config, is_tpu=False, index=0):
     # Determine default dataloader workers (GPU/CPU mode only)
     if is_tpu:
         default_workers = 0
+        prefetch_factor = None
     else:
-        # Override to 0 if dataset is cached in RAM AND CPU RAM is low (<40GB)
-        # to avoid copy-on-write RAM duplication OOMs. On high CPU RAM systems,
-        # PyArrow uses shared memory, so we can safely keep workers to parallelize audio augmentations.
         import psutil
         import multiprocessing
         num_cores = multiprocessing.cpu_count()
         total_ram_gb = psutil.virtual_memory().total / (1024**3)
+        
+        # Override to 0 if dataset is cached in RAM AND CPU RAM is low (<40GB) to avoid OOM
         if data_config.get("cache_in_memory", False) and total_ram_gb < 40.0:
             default_workers = 0
+            prefetch_factor = None
         else:
-            default_workers = max(1, int(num_cores * 0.8))
+            # Aggressive CPU utilization if high core count (>16) is detected
+            if num_cores > 16:
+                default_workers = num_cores  # Use 100% of CPU threads
+                prefetch_factor = 4          # Aggressively prefetch 4 batches in advance
+            else:
+                default_workers = max(1, int(num_cores * 0.8))
+                prefetch_factor = 2
             
     training_kwargs = {
         "output_dir": output_dir,
@@ -658,6 +665,8 @@ def run_training(args, config, is_tpu=False, index=0):
         "weight_decay": train_args["weight_decay"],
         "group_by_length": train_args.get("group_by_length", False),  # Disabled to prevent LengthGroupedSampler error when dynamic padding is used
         "dataloader_num_workers": default_workers,
+        "dataloader_prefetch_factor": prefetch_factor,
+        "dataloader_pin_memory": True,
         "eval_accumulation_steps": 10,  # Periodically clear/accumulate evaluation predictions to CPU
         "remove_unused_columns": False,
         "report_to": ["none"],
