@@ -10,6 +10,10 @@ from tqdm import tqdm
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
 def get_outputs_dir():
+    if os.path.exists("/kaggle/temp/outputs"):
+        return "/kaggle/temp/outputs"
+    elif os.path.exists("/tmp/outputs"):
+        return "/tmp/outputs"
     return "outputs"
 
 # Set up logging

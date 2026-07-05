@@ -132,6 +132,10 @@ from src.models.mms_model import get_mms_model_with_adapter, load_processor_for_
 from src.models.whisper_model import get_whisper_lora_model
 
 def get_outputs_dir():
+    if os.path.exists("/kaggle/temp"):
+        return "/kaggle/temp/outputs"
+    elif os.path.exists("/tmp"):
+        return "/tmp/outputs"
     return "outputs"
 
 # Try PyTorch/XLA imports conditionally for TPU support
@@ -669,11 +673,41 @@ def run_training(args, config, is_tpu=False, index=0):
             # Save the consolidated/compiled weights on Core 0
             xm.save(model.state_dict(), f"{output_dir}/best_model/pytorch_model.bin")
             model.config.save_pretrained(f"{output_dir}/best_model")
+            
+            # Copy best model to Kaggle working output directory for download
+            if get_outputs_dir() != "outputs" and os.path.exists("/kaggle/working"):
+                dest_dir = f"/kaggle/working/outputs/{args.target_lang}_{model_id.split('/')[-1]}_fold{args.fold}/best_model"
+                logger.info(f"Copying best model to Kaggle working output directory: {dest_dir}")
+                import shutil
+                if os.path.exists(dest_dir):
+                    try:
+                        shutil.rmtree(dest_dir)
+                    except Exception:
+                        pass
+                try:
+                    shutil.copytree(f"{output_dir}/best_model", dest_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to copy best model to working directory: {e}")
     else:
         if is_main_process:
             logger.info(f"Saving best model to {output_dir}/best_model")
             processor.save_pretrained(f"{output_dir}/best_model")
             model.save_pretrained(f"{output_dir}/best_model")
+            
+            # Copy best model to Kaggle working output directory for download
+            if get_outputs_dir() != "outputs" and os.path.exists("/kaggle/working"):
+                dest_dir = f"/kaggle/working/outputs/{args.target_lang}_{model_id.split('/')[-1]}_fold{args.fold}/best_model"
+                logger.info(f"Copying best model to Kaggle working output directory: {dest_dir}")
+                import shutil
+                if os.path.exists(dest_dir):
+                    try:
+                        shutil.rmtree(dest_dir)
+                    except Exception:
+                        pass
+                try:
+                    shutil.copytree(f"{output_dir}/best_model", dest_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to copy best model to working directory: {e}")
 
         # -------------------------------------------------------------------
         # Build KenLM language model binary from training transcripts.
@@ -682,7 +716,6 @@ def run_training(args, config, is_tpu=False, index=0):
         # -------------------------------------------------------------------
         try:
             from src.decoding.kenlm_utils import build_language_model
-            import pandas as pd
             train_path = f"{get_outputs_dir()}/temp_train_fold{args.fold}.csv"
             if os.path.exists(train_path):
                 logger.info(f"Loading transcripts from temporary CSV for KenLM: {train_path}")
