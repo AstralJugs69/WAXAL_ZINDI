@@ -636,8 +636,9 @@ def run_training(args, config, is_tpu=False, index=0):
             prefetch_factor = None
         else:
             # Aggressive CPU utilization if high core count (>16) is detected
+            # Cap at min(8, num_cores) to prevent PyTorch DataLoader over-subscription queue overhead
             if num_cores > 16:
-                default_workers = num_cores  # Use 100% of CPU threads
+                default_workers = min(8, num_cores)
                 prefetch_factor = 4          # Aggressively prefetch 4 batches in advance
             else:
                 default_workers = max(1, int(num_cores * 0.8))
