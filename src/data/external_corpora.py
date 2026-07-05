@@ -5,6 +5,7 @@ speech datasets (Mozilla Common Voice, Google FLEURS) per target language.
 Each source is normalized into the unified WAXAL schema:
     audio (Audio @ 16kHz), normalized_transcription (str), id (str)
 """
+import os
 import logging
 from datasets import Audio, concatenate_datasets
 

@@ -608,6 +608,28 @@ def run_training(args, config, is_tpu=False, index=0):
             world_size = torch.distributed.get_world_size()
         else:
             world_size = 1
+            
+        # Detect VRAM capacity and dynamically scale down batch size to prevent OOMs
+        device = torch.cuda.current_device()
+        total_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+        
+        orig_batch_size = training_kwargs["per_device_train_batch_size"]
+        if total_memory_gb < 18.0:
+            # 16GB GPU (T4, P100) -> safe batch size is 8
+            target_batch_size = min(orig_batch_size, 8)
+        elif total_memory_gb < 30.0:
+            # 24GB GPU (L4, RTX 3090/4090) -> safe batch size is 16
+            target_batch_size = min(orig_batch_size, 16)
+        else:
+            target_batch_size = orig_batch_size
+            
+        training_kwargs["per_device_train_batch_size"] = target_batch_size
+        # Also scale eval batch size
+        training_kwargs["per_device_eval_batch_size"] = max(1, target_batch_size)
+        
+        if is_main_process and target_batch_size != orig_batch_size:
+            logger.info(f"Low VRAM detected ({total_memory_gb:.2f} GB). Dynamically scaled batch size from {orig_batch_size} to {target_batch_size} to prevent CUDA OOM.")
+            
         per_device_batch = training_kwargs["per_device_train_batch_size"]
         target_effective_batch = train_args.get("target_effective_batch", 64)
         accum_steps = max(1, target_effective_batch // (per_device_batch * world_size))
