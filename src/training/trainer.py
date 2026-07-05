@@ -693,22 +693,25 @@ def run_training(args, config, is_tpu=False, index=0):
     # -----------------------------------------------------------------------
     # Precompute length column for LengthGroupedSampler (speeds up training 10x-16x)
     # -----------------------------------------------------------------------
-    if is_main_process:
-        logger.info("Computing audio lengths for length-grouped batching...")
-        
-    def add_length_fn(example):
-        path = example["audio"].get("path") if isinstance(example["audio"], dict) else getattr(example["audio"], "path", "")
-        if path in audio_cache:
-            example["length"] = len(audio_cache[path][0])
-        else:
-            # Fallback if not cached
-            from src.data.dataset import get_audio_data
-            y, _ = get_audio_data(example["audio"])
-            example["length"] = len(y) if y is not None else 0
-        return example
-        
-    train_dataset = train_dataset.map(add_length_fn, keep_in_memory=True, desc="Adding length column to train dataset")
-    val_dataset = val_dataset.map(add_length_fn, keep_in_memory=True, desc="Adding length column to val dataset")
+    group_by_length_enabled = config["training"].get("group_by_length", False) or not is_gemma
+    
+    if group_by_length_enabled:
+        if is_main_process:
+            logger.info("Computing audio lengths for length-grouped batching...")
+            
+        def add_length_fn(example):
+            path = example["audio"].get("path") if isinstance(example["audio"], dict) else getattr(example["audio"], "path", "")
+            if path in audio_cache:
+                example["length"] = len(audio_cache[path][0])
+            else:
+                # Fallback if not cached
+                from src.data.dataset import get_audio_data
+                y, _ = get_audio_data(example["audio"])
+                example["length"] = len(y) if y is not None else 0
+            return example
+            
+        train_dataset = train_dataset.map(add_length_fn, keep_in_memory=True, desc="Adding length column to train dataset")
+        val_dataset = val_dataset.map(add_length_fn, keep_in_memory=True, desc="Adding length column to val dataset")
 
     # Clean up intermediate variables and force garbage collection to free CPU RAM
     if is_main_process:
