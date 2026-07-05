@@ -294,8 +294,10 @@ def run_training(args, config, is_tpu=False, index=0):
     # 1. Prepare datasets
     data_config = config["data"]
     
-    # Dynamic resource allocation for CPU and GPU (GPU/CPU mode only)
     if not is_tpu:
+        # Prevent CUDA memory fragmentation by enabling expandable segments
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        
         # 1. Set PyTorch thread limits to utilize all CPU threads on GPU
         try:
             import multiprocessing
@@ -754,8 +756,8 @@ def run_training(args, config, is_tpu=False, index=0):
             # 40GB/48GB GPU (A100-40G, L40S) -> safe batch size is 64
             target_batch_size = max(orig_batch_size, 64)
         else:
-            # 80GB+ GPU (A100-80G, H100) -> scale up to batch size 128 to maximize GPU utilization
-            target_batch_size = max(orig_batch_size, 128)
+            # 80GB+ GPU (A100-80G, H100) -> scale up to batch size 96 to maximize GPU utilization safely (avoiding OOM)
+            target_batch_size = max(orig_batch_size, 96)
             
         training_kwargs["per_device_train_batch_size"] = target_batch_size
         # Also scale eval batch size
