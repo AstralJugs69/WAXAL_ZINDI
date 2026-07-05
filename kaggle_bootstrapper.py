@@ -90,7 +90,7 @@ def extract_cache_chunks(chunks_dir, hf_home_dir):
     
     # Use native tar command for performance
     try:
-        subprocess.run(["tar", "-xzf", temp_tar, "-C", hf_home_dir], check=True)
+        subprocess.run(["tar", "-xf", temp_tar, "-C", hf_home_dir], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Extraction failed with error: {e}")
         # Clean up sentinel and partial files

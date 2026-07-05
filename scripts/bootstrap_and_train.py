@@ -171,7 +171,7 @@ def extract_cache_chunks(chunks_dir, hf_home_dir):
     os.makedirs(hf_home_dir, exist_ok=True)
     
     try:
-        subprocess.run(["tar", "-xzf", temp_tar, "-C", hf_home_dir], check=True)
+        subprocess.run(["tar", "-xf", temp_tar, "-C", hf_home_dir], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Extraction failed: {e}")
         sentinel_path = os.path.join(hf_home_dir, "extraction_completed.txt")
