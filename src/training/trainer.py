@@ -307,14 +307,14 @@ def run_training(args, config, is_tpu=False, index=0):
         except Exception:
             pass
 
-        # 2. Limit PyTorch VRAM usage to 80% of available memory
+        # 2. Limit PyTorch VRAM usage to 95% of available memory
         if torch.cuda.is_available():
             try:
                 device_idx = torch.cuda.current_device()
-                # Set memory fraction to 80% (0.8)
-                torch.cuda.set_per_process_memory_fraction(0.8, device_idx)
+                # Set memory fraction to 95% (0.95)
+                torch.cuda.set_per_process_memory_fraction(0.95, device_idx)
                 if is_main_process:
-                    logger.info("Setting PyTorch CUDA memory fraction limit to 80% (0.8) of total VRAM.")
+                    logger.info("Setting PyTorch CUDA memory fraction limit to 95% (0.95) of total VRAM.")
             except Exception as e:
                 logger.warning(f"Could not set CUDA memory fraction: {e}")
 
@@ -624,12 +624,16 @@ def run_training(args, config, is_tpu=False, index=0):
     if is_tpu:
         default_workers = 0
     else:
-        # Override to 0 if dataset is cached in RAM to avoid copy-on-write RAM duplication OOMs
-        if data_config.get("cache_in_memory", False):
+        # Override to 0 if dataset is cached in RAM AND CPU RAM is low (<40GB)
+        # to avoid copy-on-write RAM duplication OOMs. On high CPU RAM systems,
+        # PyArrow uses shared memory, so we can safely keep workers to parallelize audio augmentations.
+        import psutil
+        import multiprocessing
+        num_cores = multiprocessing.cpu_count()
+        total_ram_gb = psutil.virtual_memory().total / (1024**3)
+        if data_config.get("cache_in_memory", False) and total_ram_gb < 40.0:
             default_workers = 0
         else:
-            import multiprocessing
-            num_cores = multiprocessing.cpu_count()
             default_workers = max(1, int(num_cores * 0.8))
             
     training_kwargs = {
@@ -667,7 +671,7 @@ def run_training(args, config, is_tpu=False, index=0):
         else:
             world_size = 1
             
-        # Detect VRAM capacity and dynamically scale down batch size to prevent OOMs
+        # Detect VRAM capacity and dynamically scale batch size to target ~95% VRAM utilization
         device = torch.cuda.current_device()
         total_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
         
@@ -678,15 +682,22 @@ def run_training(args, config, is_tpu=False, index=0):
         elif total_memory_gb < 30.0:
             # 24GB GPU (L4, RTX 3090/4090) -> safe batch size is 16
             target_batch_size = min(orig_batch_size, 16)
+        elif total_memory_gb < 50.0:
+            # 40GB/48GB GPU (A100-40G, L40S) -> safe batch size is 64
+            target_batch_size = max(orig_batch_size, 64)
         else:
-            target_batch_size = orig_batch_size
+            # 80GB+ GPU (A100-80G, H100) -> scale up to batch size 128 to maximize GPU utilization
+            target_batch_size = max(orig_batch_size, 128)
             
         training_kwargs["per_device_train_batch_size"] = target_batch_size
         # Also scale eval batch size
         training_kwargs["per_device_eval_batch_size"] = max(1, target_batch_size)
         
         if is_main_process and target_batch_size != orig_batch_size:
-            logger.info(f"Low VRAM detected ({total_memory_gb:.2f} GB). Dynamically scaled batch size from {orig_batch_size} to {target_batch_size} to prevent CUDA OOM.")
+            if target_batch_size < orig_batch_size:
+                logger.info(f"Low VRAM detected ({total_memory_gb:.2f} GB). Dynamically scaled batch size down from {orig_batch_size} to {target_batch_size} to prevent CUDA OOM.")
+            else:
+                logger.info(f"High VRAM detected ({total_memory_gb:.2f} GB). Dynamically scaled batch size up from {orig_batch_size} to {target_batch_size} to maximize GPU utilization.")
             
         per_device_batch = training_kwargs["per_device_train_batch_size"]
         target_effective_batch = train_args.get("target_effective_batch", 64)
