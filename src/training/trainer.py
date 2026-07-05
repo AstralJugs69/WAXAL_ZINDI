@@ -944,12 +944,9 @@ def run_training(args, config, is_tpu=False, index=0):
             use_dora=False,
         )
         
-        shuffled_train = (
-            train_dataset
-            .shuffle(buffer_size=1000, seed=train_args.get("seed", 42))
-            .repeat(None)
-        )
-        val_ds_fixed = val_dataset.take(train_args.get("num_validation_examples", 200))
+        shuffled_train = train_dataset.shuffle(seed=train_args.get("seed", 42))
+        num_val = min(len(val_dataset), train_args.get("num_validation_examples", 200))
+        val_ds_fixed = val_dataset.select(range(num_val))
         
         trainer_kwargs = {
             "model": model,
