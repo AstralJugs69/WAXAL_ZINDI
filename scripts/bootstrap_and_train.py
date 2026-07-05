@@ -150,30 +150,36 @@ def check_extraction_valid(hf_home_dir):
     return True
 
 def extract_cache_chunks(chunks_dir, hf_home_dir):
+    """
+    Streams and extracts split tar chunks directly into the tar pipe
+    to prevent disk I/O bottlenecks and OOM errors.
+    """
     chunks = sorted([f for f in os.listdir(chunks_dir) if f.startswith("hf_cache.tar.a")])
     if not chunks:
         raise FileNotFoundError(f"No hf_cache.tar.a* chunks found in {chunks_dir}")
         
-    temp_tar = "/tmp/hf_cache_combined.tar.gz"
-    print(f"Combining {len(chunks)} chunks from {chunks_dir} into {temp_tar}...")
-    
-    with open(temp_tar, "wb") as outfile:
-        for chunk_name in chunks:
-            chunk_path = os.path.join(chunks_dir, chunk_name)
-            print(f"  Appending {chunk_name}...")
-            with open(chunk_path, "rb") as infile:
-                shutil.copyfileobj(infile, outfile)
-                
-    combined_size = os.path.getsize(temp_tar) / (1024**3)
-    print(f"Combined archive size: {combined_size:.2f} GB")
-    
-    print(f"Extracting archive to: {hf_home_dir}...")
+    chunk_paths = [os.path.join(chunks_dir, c) for c in chunks]
+    print(f"Extracting {len(chunks)} chunks directly via pipe into {hf_home_dir}...")
     os.makedirs(hf_home_dir, exist_ok=True)
     
+    tar_cmd = ["tar", "-xf", "-", "-C", hf_home_dir]
+    tar_proc = subprocess.Popen(tar_cmd, stdin=subprocess.PIPE)
+    
     try:
-        subprocess.run(["tar", "-xf", temp_tar, "-C", hf_home_dir], check=True)
-    except subprocess.CalledProcessError as e:
+        for chunk_path in chunk_paths:
+            print(f"  Streaming {os.path.basename(chunk_path)}...")
+            with open(chunk_path, "rb") as infile:
+                shutil.copyfileobj(infile, tar_proc.stdin)
+        # Close stdin to signal EOF to tar
+        tar_proc.stdin.close()
+        ret = tar_proc.wait()
+        if ret != 0:
+            raise subprocess.CalledProcessError(ret, tar_cmd)
+    except Exception as e:
         print(f"Extraction failed: {e}")
+        if tar_proc.poll() is None:
+            tar_proc.terminate()
+            tar_proc.wait()
         sentinel_path = os.path.join(hf_home_dir, "extraction_completed.txt")
         if os.path.exists(sentinel_path):
             os.remove(sentinel_path)
@@ -183,15 +189,20 @@ def extract_cache_chunks(chunks_dir, hf_home_dir):
     with open(sentinel_path, "w") as f:
         f.write("extraction completed successfully")
         
-    print(f"Cleaning up temporary archive {temp_tar}...")
-    os.remove(temp_tar)
     print("HuggingFace cache extraction completed successfully!")
 
 def start_training_subprocess(args):
     env = os.environ.copy()
-    env["HF_HOME"] = "/tmp/hf_home"
-    env["HF_HUB_CACHE"] = "/tmp/hf_home/hub"
-    env["HF_DATASETS_CACHE"] = "/tmp/hf_home/datasets"
+    if os.path.exists("/kaggle/temp"):
+        hf_home = "/kaggle/temp/hf_home"
+    elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
+        hf_home = "/tmp/hf_home"
+    else:
+        hf_home = "./hf_home"
+        
+    env["HF_HOME"] = hf_home
+    env["HF_HUB_CACHE"] = os.path.join(hf_home, "hub")
+    env["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
     env["PYTHONPATH"] = "."
     
     tpu_active = args.tpu or os.environ.get("TPU_NAME") or os.environ.get("TPU_ACCELERATOR_TYPE") or os.path.exists("/usr/share/tpu-support")
@@ -244,7 +255,13 @@ def main():
     bootstrap_environment(args.tpu)
     
     # 3. Extract HuggingFace cache chunks if available
-    hf_home = "/tmp/hf_home" if os.path.exists("/kaggle/working") or os.path.exists("/content") else "./hf_home"
+    if os.path.exists("/kaggle/temp"):
+        hf_home = "/kaggle/temp/hf_home"
+    elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
+        hf_home = "/tmp/hf_home"
+    else:
+        hf_home = "./hf_home"
+        
     chunks_dir = find_cache_chunks_dir()
     if chunks_dir:
         if check_extraction_valid(hf_home):
