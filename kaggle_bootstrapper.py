@@ -168,7 +168,7 @@ def main():
     print(f"Current working directory set to: {os.getcwd()}")
 
     print("\n=== Step 2: Making Shell Scripts Executable ===")
-    for script in ["install_dependencies.sh", "run_training.sh", "bootstrap_and_train.py", "run_kaggle.py"]:
+    for script in ["install_dependencies.sh", "run_training.sh", "bootstrap_and_train.py", "run_kaggle.py", "run_lightning.py"]:
         script_path = os.path.join("scripts", script)
         if os.path.exists(script_path):
             os.chmod(script_path, 0o755)
