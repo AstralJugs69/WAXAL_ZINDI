@@ -98,19 +98,34 @@ def main():
     models = {}
     processors = {}
     decoders = {}
+    model_families = {}
     
     for lang in target_languages:
-        # Check custom fold checkpoint
-        custom_model_dir = f"{get_outputs_dir()}/{lang}_mms-300m_fold0/best_model"
-        if os.path.exists(custom_model_dir):
-            logger.info(f"Found custom fine-tuned model for {lang} at {custom_model_dir}")
-            model = Wav2Vec2ForCTC.from_pretrained(custom_model_dir)
-            processor = Wav2Vec2Processor.from_pretrained(custom_model_dir)
-            # Re-set target lang to be absolutely sure
+        # Check custom fold checkpoint for Gemma first
+        custom_gemma_dir = f"{get_outputs_dir()}/{lang}_gemma-3n-E2B-it_fold0/best_model"
+        custom_mms_dir = f"{get_outputs_dir()}/{lang}_mms-300m_fold0/best_model"
+        
+        if os.path.exists(custom_gemma_dir):
+            logger.info(f"Found custom fine-tuned Gemma model for {lang} at {custom_gemma_dir}")
+            import timm
+            from transformers import Gemma3nForConditionalGeneration, AutoProcessor
+            model = Gemma3nForConditionalGeneration.from_pretrained(
+                custom_gemma_dir,
+                torch_dtype=torch.bfloat16,
+                device_map="auto"
+            )
+            processor = AutoProcessor.from_pretrained(custom_gemma_dir)
+            model_families[lang] = "gemma"
+            decoders[lang] = None
+        elif os.path.exists(custom_mms_dir):
+            logger.info(f"Found custom fine-tuned MMS model for {lang} at {custom_mms_dir}")
+            model = Wav2Vec2ForCTC.from_pretrained(custom_mms_dir)
+            processor = Wav2Vec2Processor.from_pretrained(custom_mms_dir)
             processor.tokenizer.set_target_lang(lang)
+            model_families[lang] = "mms"
             
             # Check KenLM binary
-            lm_path = os.path.join(custom_model_dir, "lm.bin")
+            lm_path = os.path.join(custom_mms_dir, "lm.bin")
             if os.path.exists(lm_path):
                 logger.info(f"Found compiled KenLM binary for {lang} at {lm_path}")
                 try:
@@ -128,9 +143,11 @@ def main():
             model = Wav2Vec2ForCTC.from_pretrained("facebook/mms-1b-all", target_lang=lang, ignore_mismatched_sizes=True)
             processor = Wav2Vec2Processor.from_pretrained("facebook/mms-1b-all", target_lang=lang)
             processor.tokenizer.set_target_lang(lang)
+            model_families[lang] = "mms"
             decoders[lang] = None
             
-        model = model.to(device)
+        if model_families[lang] != "gemma":
+            model = model.to(device)
         model.eval()
         models[lang] = model
         processors[lang] = processor
@@ -177,19 +194,56 @@ def main():
             
             transcriptions = []
             for chunk in chunks:
-                inputs = processor(chunk, sampling_rate=16000, return_tensors="pt")
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                
-                with torch.no_grad():
-                    logits = model(**inputs).logits[0].cpu().numpy()
+                if model_families[detected_lang] == "gemma":
+                    messages = [
+                        {
+                            "role": "system",
+                            "content": [{"type": "text", "text": "You are an assistant that transcribes speech accurately."}],
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "audio", "audio": chunk.flatten()},
+                                {"type": "text", "text": "Please transcribe this audio."},
+                            ],
+                        }
+                    ]
+                    chat_prompt = processor.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                    inputs = processor(
+                        text=chat_prompt,
+                        audio=chunk.flatten(),
+                        return_tensors="pt",
+                    ).to(device)
                     
-                # Decode logits
-                if decoder is not None:
-                    chunk_text = decode_logits(decoder, logits, beam_width=128)
+                    if hasattr(model, "dtype"):
+                        inputs = {k: v.to(model.dtype) if v.is_floating_point() else v for k, v in inputs.items()}
+                        
+                    with torch.no_grad():
+                        outputs = model.generate(
+                            **inputs,
+                            max_new_tokens=128,
+                            pad_token_id=processor.tokenizer.pad_token_id,
+                        )
+                    input_len = inputs.input_ids.shape[1]
+                    chunk_text = processor.tokenizer.decode(
+                        outputs[0][input_len:], skip_special_tokens=True
+                    )
                 else:
-                    # Greedy decoding fallback
-                    pred_ids = np.argmax(logits, axis=-1)
-                    chunk_text = processor.decode(pred_ids)
+                    inputs = processor(chunk, sampling_rate=16000, return_tensors="pt")
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    
+                    with torch.no_grad():
+                        logits = model(**inputs).logits[0].cpu().numpy()
+                        
+                    # Decode logits
+                    if decoder is not None:
+                        chunk_text = decode_logits(decoder, logits, beam_width=128)
+                    else:
+                        # Greedy decoding fallback
+                        pred_ids = np.argmax(logits, axis=-1)
+                        chunk_text = processor.decode(pred_ids)
                     
                 normalized_chunk = normalize_text(chunk_text)
                 if normalized_chunk:
