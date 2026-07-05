@@ -569,6 +569,12 @@ def run_training(args, config, is_tpu=False, index=0):
             path, audio_info = item
             try:
                 y, sr = get_audio_data(audio_info)
+                # Resample to 16kHz at caching time (in parallel) to prevent massive CPU overhead
+                # during the training loop.
+                if y is not None and sr is not None and sr != 16000:
+                    import librosa
+                    y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+                    sr = 16000
                 return path, y, sr
             except Exception:
                 return path, None, None
@@ -671,6 +677,30 @@ def run_training(args, config, is_tpu=False, index=0):
                 default_workers = max(1, int(num_cores * 0.8))
                 prefetch_factor = 2
             
+    # Dynamic Mixed Precision and Activation Checkpointing Resolver
+    bf16_active = is_tpu
+    fp16_active = train_args["fp16"] and not is_tpu and torch.cuda.is_available()
+    grad_checkpointing = train_args["gradient_checkpointing"] and not is_tpu
+    
+    if not is_tpu and torch.cuda.is_available():
+        # Enable hardware-native BF16 mixed-precision on Ampere+ GPUs (A100, H100, RTX 30/40) for massive speedups
+        if torch.cuda.is_bf16_supported():
+            bf16_active = True
+            fp16_active = False
+            if is_main_process:
+                logger.info("BF16 compatibility detected. Enabling native BF16 training.")
+                
+        # Disable activation checkpointing on high-VRAM GPUs (>40GB) to avoid recomputing forward activations, saving ~33% speed
+        try:
+            device = torch.cuda.current_device()
+            total_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+            if total_memory_gb > 40.0:
+                grad_checkpointing = False
+                if is_main_process:
+                    logger.info(f"High VRAM detected ({total_memory_gb:.2f} GB). Disabling gradient checkpointing to maximize training speed.")
+        except Exception:
+            pass
+
     training_kwargs = {
         "output_dir": output_dir,
         "per_device_train_batch_size": train_args["per_device_train_batch_size"],
@@ -679,9 +709,9 @@ def run_training(args, config, is_tpu=False, index=0):
         "learning_rate": float(train_args["learning_rate"]),
         "warmup_steps": train_args["warmup_steps"],
         "num_train_epochs": train_args["num_train_epochs"],
-        "fp16": train_args["fp16"] and not is_tpu and torch.cuda.is_available(),
-        "bf16": is_tpu,  # Hardware-accelerated bfloat16 on TPU
-        "gradient_checkpointing": train_args["gradient_checkpointing"] and not is_tpu,
+        "fp16": fp16_active,
+        "bf16": bf16_active,
+        "gradient_checkpointing": grad_checkpointing,
         "eval_strategy": train_args["evaluation_strategy"],
         "eval_steps": train_args["eval_steps"],
         "save_steps": train_args["save_steps"],
