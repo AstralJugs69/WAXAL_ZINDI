@@ -53,23 +53,73 @@ def self_update():
 
 def setup_kaggle_credentials():
     """
-    Configures ~/.kaggle/kaggle.json from the repo root file.
+    Configures ~/.kaggle/kaggle.json from command line arguments, environment,
+    or robust filesystem search.
     """
     print("=== Step 2: Configuring Kaggle Credentials ===")
     home_dir = os.path.expanduser("~")
     kaggle_dir = os.path.join(home_dir, ".kaggle")
     os.makedirs(kaggle_dir, exist_ok=True)
-    
-    src_json = "kaggle.json"
     dest_json = os.path.join(kaggle_dir, "kaggle.json")
     
-    if os.path.exists(src_json):
-        shutil.copy(src_json, dest_json)
-        # Set read/write permissions for owner only
-        os.chmod(dest_json, 0o600)
-        print(f"Successfully configured Kaggle credentials at {dest_json}")
+    # 1. Parse command-line args for credentials
+    username = os.environ.get("KAGGLE_USERNAME")
+    key = os.environ.get("KAGGLE_KEY")
+    
+    args = sys.argv[1:]
+    if "--kaggle_username" in args:
+        idx = args.index("--kaggle_username")
+        if idx + 1 < len(args):
+            username = args[idx + 1]
+            sys.argv.pop(idx + 1)
+            sys.argv.pop(idx)
+            
+    args = sys.argv[1:]
+    if "--kaggle_key" in args:
+        idx = args.index("--kaggle_key")
+        if idx + 1 < len(args):
+            key = args[idx + 1]
+            sys.argv.pop(idx + 1)
+            sys.argv.pop(idx)
+            
+    if username and key:
+        import json
+        try:
+            with open(dest_json, "w") as f:
+                json.dump({"username": username, "key": key}, f)
+            os.chmod(dest_json, 0o600)
+            print(f"Successfully configured Kaggle credentials via CLI arguments at {dest_json}")
+            return
+        except Exception as e:
+            print(f"Warning: Failed to write Kaggle credentials from arguments: {e}")
+
+    # 2. Search filesystem for kaggle.json
+    search_paths = [
+        "kaggle.json",
+        "../kaggle.json",
+        "../../kaggle.json",
+        "/teamspace/studios/this_studio/kaggle.json",
+        "/teamspace/studios/this_studio/WAXAL_ZINDI/kaggle.json",
+        "/teamspace/studios/this_studio/WAXAL_ZINDI/waxal_asr_challenge/kaggle.json",
+        os.path.join(home_dir, "kaggle.json")
+    ]
+    
+    src_json = None
+    for path in search_paths:
+        if os.path.exists(path):
+            src_json = path
+            break
+            
+    if src_json:
+        print(f"Found kaggle.json at: {src_json}")
+        try:
+            shutil.copy(src_json, dest_json)
+            os.chmod(dest_json, 0o600)
+            print(f"Successfully configured Kaggle credentials at {dest_json}")
+        except Exception as e:
+            print(f"Warning: Failed to copy kaggle.json from {src_json}: {e}")
     else:
-        print("Warning: kaggle.json not found in repository root. Kaggle download may fail.")
+        print("Warning: kaggle.json not found in search paths and no CLI credentials provided.")
 
 def download_and_extract_cache(hf_home_dir):
     """
