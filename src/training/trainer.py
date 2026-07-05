@@ -764,8 +764,8 @@ def run_training(args, config, is_tpu=False, index=0):
             # 24GB GPU (L4, RTX 3090/4090) -> safe batch size is 16
             target_batch_size = min(orig_batch_size, 16)
         else:
-            # 40GB+ GPU (A100, L40S, H100) -> scale to optimal batch size 32 to maximize GPU L2 cache hit rate and prevent VRAM thrashing
-            target_batch_size = min(orig_batch_size, 32)
+            # 40GB+ GPU (A100, L40S, H100) -> scale to target batch size 64 as requested (gradient accumulation is disabled)
+            target_batch_size = min(orig_batch_size, 64)
             
         training_kwargs["per_device_train_batch_size"] = target_batch_size
         # Also scale eval batch size
