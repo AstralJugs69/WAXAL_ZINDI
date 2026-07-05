@@ -131,8 +131,6 @@ from src.models.mms_model import get_mms_model_with_adapter, load_processor_for_
 from src.models.whisper_model import get_whisper_lora_model
 
 def get_outputs_dir():
-    if os.path.exists("/teamspace/studios/this_studio"):
-        return "/teamspace/studios/this_studio/outputs"
     return "outputs"
 
 # Try PyTorch/XLA imports conditionally for TPU support

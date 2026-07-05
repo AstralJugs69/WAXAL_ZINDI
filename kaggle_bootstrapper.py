@@ -30,6 +30,85 @@ def run_command_live(cmd, cwd=None):
     if process.returncode != 0:
         raise subprocess.CalledProcessError(process.returncode, cmd)
 
+def find_cache_chunks_dir():
+    """
+    Recursively scans /kaggle/input, /content, and current directory
+    to locate the folder containing the hf_cache.tar.aa chunk.
+    """
+    search_roots = ["/kaggle/input", "/content", "."]
+    for search_root in search_roots:
+        if not os.path.exists(search_root):
+            continue
+        for root, dirs, files in os.walk(search_root):
+            # Skip code repo itself to avoid matching downloaded assets recursively
+            if ".git" in root or "hf_home" in root or "WAXAL_ZINDI" in root:
+                continue
+            if "hf_cache.tar.aa" in files:
+                print(f"Discovered cache chunks folder at: {root}")
+                return root
+    return None
+
+def check_extraction_valid(hf_home_dir):
+    """
+    Checks if the cache extraction was already performed and is valid.
+    """
+    sentinel_path = os.path.join(hf_home_dir, "extraction_completed.txt")
+    if not os.path.exists(sentinel_path):
+        return False
+    # Verify subdirectories exist and have content
+    for sub in ["hub", "datasets"]:
+        sub_path = os.path.join(hf_home_dir, sub)
+        if not os.path.exists(sub_path) or not os.listdir(sub_path):
+            return False
+    return True
+
+def extract_cache_chunks(chunks_dir, hf_home_dir):
+    """
+    Combines the split tar.gz chunks and extracts them to the hf_home cache directory.
+    """
+    # Find all chunks hf_cache.tar.aa, ab, ac...
+    chunks = sorted([f for f in os.listdir(chunks_dir) if f.startswith("hf_cache.tar.a")])
+    if not chunks:
+        raise FileNotFoundError(f"No hf_cache.tar.a* chunks found in {chunks_dir}")
+        
+    temp_tar = "/tmp/hf_cache_combined.tar.gz"
+    print(f"Combining {len(chunks)} chunks from {chunks_dir} into {temp_tar}...")
+    
+    # Concatenate chunk bytes
+    with open(temp_tar, "wb") as outfile:
+        for chunk_name in chunks:
+            chunk_path = os.path.join(chunks_dir, chunk_name)
+            print(f"  Appending {chunk_name}...")
+            with open(chunk_path, "rb") as infile:
+                shutil.copyfileobj(infile, outfile)
+                
+    combined_size = os.path.getsize(temp_tar) / (1024**3)
+    print(f"Combined archive size: {combined_size:.2f} GB")
+    
+    print(f"Extracting archive to: {hf_home_dir}...")
+    os.makedirs(hf_home_dir, exist_ok=True)
+    
+    # Use native tar command for performance
+    try:
+        subprocess.run(["tar", "-xzf", temp_tar, "-C", hf_home_dir], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Extraction failed with error: {e}")
+        # Clean up sentinel and partial files
+        sentinel_path = os.path.join(hf_home_dir, "extraction_completed.txt")
+        if os.path.exists(sentinel_path):
+            os.remove(sentinel_path)
+        raise e
+        
+    # Write sentinel file
+    sentinel_path = os.path.join(hf_home_dir, "extraction_completed.txt")
+    with open(sentinel_path, "w") as f:
+        f.write("extraction completed successfully")
+        
+    # Clean up the combined tar file
+    print(f"Cleaning up temporary archive {temp_tar}...")
+    os.remove(temp_tar)
+    print("HuggingFace cache extraction completed successfully!")
+
 def main():
     repo_url = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
     working_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "/content"
@@ -91,10 +170,14 @@ def main():
     print(f"Current working directory set to: {os.getcwd()}")
 
     print("\n=== Step 2: Making Shell Scripts Executable ===")
-    for script in ["install_dependencies.sh", "run_training.sh"]:
+    for script in ["install_dependencies.sh", "run_training.sh", "bootstrap_and_train.py", "run_kaggle.py"]:
         script_path = os.path.join("scripts", script)
         if os.path.exists(script_path):
             os.chmod(script_path, 0o755)
+        # Check root of repository as well
+        root_script_path = os.path.join(".", script)
+        if os.path.exists(root_script_path):
+            os.chmod(root_script_path, 0o755)
 
     scan_root = "/kaggle" if os.path.exists("/kaggle") else "/content"
     print(f"\n=== Scanning {scan_root} Workspace Files ===")
@@ -148,6 +231,19 @@ def main():
 
     print("\n=== Step 3: Installing Dependencies & Compiling KenLM ===")
     run_command_live(["bash", "scripts/install_dependencies.sh"])
+
+    print("\n=== Step 3.5: Extracting HuggingFace Cache Chunks ===")
+    chunks_dir = find_cache_chunks_dir()
+    if chunks_dir:
+        if check_extraction_valid(hf_home):
+            print(f"Valid extraction sentinel found at {hf_home}. Skipping extraction.")
+        else:
+            try:
+                extract_cache_chunks(chunks_dir, hf_home)
+            except Exception as e:
+                print(f"Warning: Cache extraction failed: {e}. Training will continue using default Hugging Face download.")
+    else:
+        print("Notice: hf_cache.tar.aa chunk was not found in standard directories. Skipping local cache extraction.")
 
     print("\n=== Step 4: Kickstarting Model Training Pipeline ===")
     tpu_flag = "--tpu" if tpu_active else ""
