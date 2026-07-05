@@ -692,16 +692,7 @@ def run_training(args, config, is_tpu=False, index=0):
             if is_main_process:
                 logger.info("BF16 compatibility detected. Enabling native BF16 training.")
                 
-        # Disable activation checkpointing on high-VRAM GPUs (>40GB) to avoid recomputing forward activations, saving ~33% speed
-        try:
-            device = torch.cuda.current_device()
-            total_memory_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
-            if total_memory_gb > 40.0:
-                grad_checkpointing = False
-                if is_main_process:
-                    logger.info(f"High VRAM detected ({total_memory_gb:.2f} GB). Disabling gradient checkpointing to maximize training speed.")
-        except Exception:
-            pass
+
 
     training_kwargs = {
         "output_dir": output_dir,
@@ -752,12 +743,9 @@ def run_training(args, config, is_tpu=False, index=0):
         elif total_memory_gb < 30.0:
             # 24GB GPU (L4, RTX 3090/4090) -> safe batch size is 16
             target_batch_size = min(orig_batch_size, 16)
-        elif total_memory_gb < 50.0:
-            # 40GB/48GB GPU (A100-40G, L40S) -> safe batch size is 64
-            target_batch_size = max(orig_batch_size, 64)
         else:
-            # 80GB+ GPU (A100-80G, H100) -> scale up to batch size 96 to maximize GPU utilization safely (avoiding OOM)
-            target_batch_size = max(orig_batch_size, 96)
+            # 40GB+ GPU (A100, L40S, H100) -> scale up to batch size 128 (very safe with gradient checkpointing enabled)
+            target_batch_size = max(orig_batch_size, 128)
             
         training_kwargs["per_device_train_batch_size"] = target_batch_size
         # Also scale eval batch size
