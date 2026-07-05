@@ -272,8 +272,95 @@ def get_compute_metrics_fn(processor, is_seq2seq):
         
     return compute_metrics
 
+
+def run_gemma_evaluation(eval_dataset, model, processor, batch_size=4):
+    """
+    Decodes audio samples using Gemma 3n's native autoregressive generation
+    and evaluates transcripts against references using WER and CER.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    
+    references = []
+    predictions = []
+    
+    for batch in eval_dataset.batch(batch_size=batch_size):
+        transcriptions = batch.get("transcription") or batch.get("normalized_transcription") or []
+        
+        # Collate audio arrays
+        audios = []
+        for audio_info in batch["audio"]:
+            if isinstance(audio_info, dict) and "array" in audio_info:
+                arr = np.asarray(audio_info["array"]).flatten()
+            else:
+                arr = np.asarray(audio_info).flatten()
+            audios.append(arr)
+            
+        # Apply chat templates dynamically
+        texts = []
+        for i, transcript in enumerate(transcriptions):
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are an assistant that transcribes speech accurately."}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio", "audio": audios[i]},
+                        {"type": "text", "text": "Please transcribe this audio."},
+                    ],
+                }
+            ]
+            chat_prompt = processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            texts.append(chat_prompt)
+            
+        inputs = processor(
+            text=texts,
+            audio=audios,
+            return_tensors="pt",
+            padding=True,
+        ).to(device)
+        
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=128,
+                pad_token_id=processor.tokenizer.pad_token_id,
+            )
+            
+        input_len = inputs.input_ids.shape[1]
+        decoded = processor.tokenizer.batch_decode(
+            outputs[:, input_len:], skip_special_tokens=True
+        )
+        
+        references.extend(transcriptions)
+        predictions.extend([t.strip() for t in decoded])
+        
+    refs_normalized = [normalize_text(r) for r in references]
+    preds_normalized = [normalize_text(p) for p in predictions]
+    
+    valid_refs = []
+    valid_preds = []
+    for r, p in zip(refs_normalized, preds_normalized):
+        if r.strip():
+            valid_refs.append(r)
+            valid_preds.append(p)
+            
+    if not valid_refs:
+        return {"wer": 1.0, "cer": 1.0}
+        
+    wer = jiwer.wer(valid_refs, valid_preds)
+    cer = jiwer.cer(valid_refs, valid_preds)
+    return {"wer": wer, "cer": cer}
+
+
 def run_training(args, config, is_tpu=False, index=0):
     model_id = config["model_id"]
+    model_family = config.get("model_family", "mms")
+    is_gemma = (model_family == "gemma")
     is_seq2seq = "whisper" in model_id.lower()
 
     # Determine whether this process is the master (rank-0) process.
@@ -457,7 +544,18 @@ def run_training(args, config, is_tpu=False, index=0):
             logger.info(f"CUDA Device Name: {torch.cuda.get_device_name(local_rank)}")
             
     # 3. Load processor and model
-    if is_seq2seq:
+    if is_gemma:
+        import timm
+        from src.models.gemma_model import load_processor_for_gemma, get_gemma_model
+        processor = load_processor_for_gemma(model_id=model_id)
+        model = get_gemma_model(
+            model_id=model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto" if not is_tpu else None
+        )
+        if is_tpu:
+            model = model.to(device)
+    elif is_seq2seq:
         processor = WhisperProcessor.from_pretrained(model_id, language=args.target_lang, task="transcribe")
         model = get_whisper_lora_model(
             model_id=model_id,
@@ -481,7 +579,6 @@ def run_training(args, config, is_tpu=False, index=0):
             processor=processor,
             torch_dtype=model_dtype
         )
-        model = model.to(device)
         model = model.to(device)
         
     # Ensure all targets are mapped and audio is decoded at 16kHz
@@ -635,7 +732,7 @@ def run_training(args, config, is_tpu=False, index=0):
     pa.default_memory_pool().release_unused()
     
     # JIT warm-up dummy step for TPU to pre-populate compilation cache
-    if is_tpu:
+    if is_tpu and not is_gemma:
         if index == 0:
             logger.info("Executing JIT warm-up step to populate compilation cache...")
             try:
@@ -656,21 +753,34 @@ def run_training(args, config, is_tpu=False, index=0):
         xm.rendezvous("tpu_jit_warmup_barrier")
             
     # 4. Setup augmentator and data collator (apply static bucketing on TPU)
-    augmentator = DynamicAugmentator()
-    data_collator = ASRDataCollatorWithPadding(
-        processor=processor,
-        augmentator=augmentator,
-        is_seq2seq=is_seq2seq,
-        sampling_rate=16000,
-        static_buckets=is_tpu,
-        audio_cache=audio_cache
-    )
+    if is_gemma:
+        from src.data.gemma_augment import GemmaDataCollator
+        data_collator = GemmaDataCollator(
+            processor=processor,
+            audio_cache=audio_cache,
+            system_message=config["data"].get("system_message"),
+            user_message=config["data"].get("user_message")
+        )
+    else:
+        augmentator = DynamicAugmentator()
+        data_collator = ASRDataCollatorWithPadding(
+            processor=processor,
+            augmentator=augmentator,
+            is_seq2seq=is_seq2seq,
+            sampling_rate=16000,
+            static_buckets=is_tpu,
+            audio_cache=audio_cache
+        )
     
     # 5. Training arguments
     train_args = config["training"]
     output_dir = f"{get_outputs_dir()}/{args.target_lang}_{model_id.split('/')[-1]}_fold{args.fold}"
     
-    training_class = Seq2SeqTrainingArguments if is_seq2seq else TrainingArguments
+    if is_gemma:
+        from trl import SFTConfig
+        training_class = SFTConfig
+    else:
+        training_class = Seq2SeqTrainingArguments if is_seq2seq else TrainingArguments
     
     # Determine default dataloader workers (GPU/CPU mode only)
     if is_tpu:
@@ -789,7 +899,12 @@ def run_training(args, config, is_tpu=False, index=0):
                 f"Effective Batch Size={per_device_batch * world_size * accum_steps}"
             )
             
-    if is_seq2seq:
+    if is_gemma:
+        training_kwargs["dataset_kwargs"] = {"skip_prepare_dataset": True}
+        training_kwargs["max_seq_length"] = train_args.get("max_seq_length", 64)
+        training_kwargs["packing"] = False
+        training_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
+    elif is_seq2seq:
         training_kwargs["predict_with_generate"] = True
         training_kwargs["generation_max_length"] = 225
         
@@ -806,22 +921,59 @@ def run_training(args, config, is_tpu=False, index=0):
     obs_callback = ObservabilityCallback(output_dir=output_dir)
     gc_callback = GarbageCollectionCallback()
     
-    trainer_class = Seq2SeqTrainer if is_seq2seq else Trainer
-    
-    trainer_kwargs = {
-        "model": model,
-        "args": trainer_args,
-        "train_dataset": train_dataset,
-        "eval_dataset": val_dataset,
-        "data_collator": data_collator,
-        "compute_metrics": get_compute_metrics_fn(processor, is_seq2seq),
-        "processing_class": processor.feature_extractor,  # Required for CTC padding
-        "callbacks": [obs_callback, gc_callback]
-    }
-    if not is_seq2seq:
-        trainer_kwargs["preprocess_logits_for_metrics"] = preprocess_logits_for_metrics
+    if is_gemma:
+        import peft
+        import trl
         
-    trainer = trainer_class(**trainer_kwargs)
+        class _SFTTrainer(trl.SFTTrainer):
+            def create_model_card(self, model_name=None, dataset_name=None, tags=None):
+                pass
+                
+        peft_config = peft.LoraConfig(
+            task_type="CAUSAL_LM",
+            r=config["peft"]["r"],
+            lora_alpha=config["peft"]["lora_alpha"],
+            lora_dropout=config["peft"]["lora_dropout"],
+            target_modules=config["peft"]["target_modules"],
+            bias="none",
+            use_rslora=False,
+            use_dora=False,
+        )
+        
+        shuffled_train = (
+            train_dataset
+            .shuffle(buffer_size=1000, seed=train_args.get("seed", 42))
+            .repeat(None)
+        )
+        val_ds_fixed = val_dataset.take(train_args.get("num_validation_examples", 200))
+        
+        trainer_kwargs = {
+            "model": model,
+            "args": trainer_args,
+            "data_collator": data_collator,
+            "train_dataset": shuffled_train,
+            "eval_dataset": val_ds_fixed,
+            "peft_config": peft_config,
+            "callbacks": [obs_callback, gc_callback]
+        }
+        trainer = _SFTTrainer(**trainer_kwargs)
+    else:
+        trainer_class = Seq2SeqTrainer if is_seq2seq else Trainer
+        
+        trainer_kwargs = {
+            "model": model,
+            "args": trainer_args,
+            "train_dataset": train_dataset,
+            "eval_dataset": val_dataset,
+            "data_collator": data_collator,
+            "compute_metrics": get_compute_metrics_fn(processor, is_seq2seq),
+            "processing_class": processor.feature_extractor,  # Required for CTC padding
+            "callbacks": [obs_callback, gc_callback]
+        }
+        if not is_seq2seq:
+            trainer_kwargs["preprocess_logits_for_metrics"] = preprocess_logits_for_metrics
+            
+        trainer = trainer_class(**trainer_kwargs)
     
     # 7. Start training
     if is_main_process:
@@ -878,38 +1030,50 @@ def run_training(args, config, is_tpu=False, index=0):
                 except Exception as e:
                     logger.warning(f"Failed to copy best model to working directory: {e}")
 
+        # Run post-training evaluation on validation set for Gemma
+        if is_gemma and is_main_process:
+            logger.info("Running post-training evaluation on validation set...")
+            try:
+                val_metrics = run_gemma_evaluation(val_ds_fixed, model, processor)
+                logger.info(f"📊 Gemma ASR Validation Metrics:")
+                logger.info(f"   WER : {val_metrics['wer']:.2%}")
+                logger.info(f"   CER : {val_metrics['cer']:.2%}")
+            except Exception as e:
+                logger.warning(f"Post-training evaluation failed: {e}")
+
         # -------------------------------------------------------------------
         # Build KenLM language model binary from training transcripts.
         # This runs once on the master process after training and is a no-op
         # if lm.bin already exists (safe to restart).
         # -------------------------------------------------------------------
-        try:
-            from src.decoding.kenlm_utils import build_language_model
-            train_path = f"{get_outputs_dir()}/temp_train_fold{args.fold}.csv"
-            if os.path.exists(train_path):
-                logger.info(f"Loading transcripts from temporary CSV for KenLM: {train_path}")
-                train_split_df_temp = pd.read_csv(train_path)
-                all_transcripts = list(train_split_df_temp["normalized_transcription"].dropna())
-            else:
-                all_transcripts = list(train_split_df["normalized_transcription"].dropna())
-                
-            lm_output_dir = f"{output_dir}/best_model"
-            logger.info(f"Building KenLM language model from {len(all_transcripts)} training transcripts...")
-            lm_bin_path = build_language_model(
-                transcripts=all_transcripts,
-                output_dir=lm_output_dir,
-                kenlm_dir="kenlm",
-                order=5,
-            )
-            if lm_bin_path:
-                logger.info(f"KenLM binary saved at: {lm_bin_path}")
-                # Write path to a sidecar file so inference pipeline can discover it
-                lm_ref_path = f"{output_dir}/best_model/lm_bin_path.txt"
-                with open(lm_ref_path, "w") as _f:
-                    _f.write(lm_bin_path)
-                logger.info(f"LM path reference written to {lm_ref_path}")
-        except Exception as exc:
-            logger.warning(f"KenLM LM build failed ({exc}). Inference will fall back to greedy decoding.")
+        if not is_gemma:
+            try:
+                from src.decoding.kenlm_utils import build_language_model
+                train_path = f"{get_outputs_dir()}/temp_train_fold{args.fold}.csv"
+                if os.path.exists(train_path):
+                    logger.info(f"Loading transcripts from temporary CSV for KenLM: {train_path}")
+                    train_split_df_temp = pd.read_csv(train_path)
+                    all_transcripts = list(train_split_df_temp["normalized_transcription"].dropna())
+                else:
+                    all_transcripts = list(train_split_df["normalized_transcription"].dropna())
+                    
+                lm_output_dir = f"{output_dir}/best_model"
+                logger.info(f"Building KenLM language model from {len(all_transcripts)} training transcripts...")
+                lm_bin_path = build_language_model(
+                    transcripts=all_transcripts,
+                    output_dir=lm_output_dir,
+                    kenlm_dir="kenlm",
+                    order=5,
+                )
+                if lm_bin_path:
+                    logger.info(f"KenLM binary saved at: {lm_bin_path}")
+                    # Write path to a sidecar file so inference pipeline can discover it
+                    lm_ref_path = f"{output_dir}/best_model/lm_bin_path.txt"
+                    with open(lm_ref_path, "w") as _f:
+                        _f.write(lm_bin_path)
+                    logger.info(f"LM path reference written to {lm_ref_path}")
+            except Exception as exc:
+                logger.warning(f"KenLM LM build failed ({exc}). Inference will fall back to greedy decoding.")
             
     # Ensure all spawned TPU processes synchronize at the exit to prevent termination race conditions
     if is_tpu:
@@ -1038,13 +1202,19 @@ def main():
             languages=[args.target_lang],
             k_folds=data_config["k_folds"]
         )
-        from src.models.mms_model import load_processor_for_mms
-        load_processor_for_mms(model_id=config["model_id"], target_lang=args.target_lang)
-        
-        # Pre-download the model checkpoint to disk cache so workers don't fight for locks
-        from transformers import Wav2Vec2ForCTC
-        logger.info(f"Pre-downloading model weights for {config['model_id']} to disk cache...")
-        Wav2Vec2ForCTC.from_pretrained(config["model_id"])
+        model_family = config.get("model_family", "mms")
+        if model_family == "gemma":
+            import timm
+            from src.models.gemma_model import load_processor_for_gemma, get_gemma_model
+            load_processor_for_gemma(model_id=config["model_id"])
+            logger.info(f"Pre-downloading model weights for {config['model_id']} to disk cache...")
+            get_gemma_model(model_id=config["model_id"])
+        else:
+            from src.models.mms_model import load_processor_for_mms
+            load_processor_for_mms(model_id=config["model_id"], target_lang=args.target_lang)
+            from transformers import Wav2Vec2ForCTC
+            logger.info(f"Pre-downloading model weights for {config['model_id']} to disk cache...")
+            Wav2Vec2ForCTC.from_pretrained(config["model_id"])
         
         logger.info("Executing dataset pre-filtering before spawning TPU workers...")
         pre_filter_and_save_splits(args, config)

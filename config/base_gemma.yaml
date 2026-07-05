@@ -1,0 +1,47 @@
+model_id: "google/gemma-3n-E2B-it"
+model_family: "gemma"
+languages:
+  - "lin"
+  - "sna"
+  - "lug"
+
+training:
+  learning_rate: 1.0e-3
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 8
+  target_effective_batch: 16
+  max_steps: 500
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  warmup_steps: 50
+  evaluation_strategy: "steps"
+  eval_steps: 100
+  save_steps: 100
+  logging_steps: 10
+  save_total_limit: 3
+  load_best_model_at_end: false
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  weight_decay: 0.01
+  group_by_length: false
+  dataloader_num_workers: 2
+  max_seq_length: 64
+
+peft:
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+    - "v_proj"
+    - "o_proj"
+
+data:
+  dataset_id: "google/WaxalNLP"
+  system_message: "You are an assistant that transcribes speech accurately."
+  user_message: "Please transcribe this audio."
+  duration_min: 1.5
+  duration_max: 20.0
+  k_folds: 5
+  use_external_corpora: false
