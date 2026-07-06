@@ -872,7 +872,8 @@ def run_training(args, config, is_tpu=False, index=0):
         "eval_accumulation_steps": 10,  # Periodically clear/accumulate evaluation predictions to CPU
         "remove_unused_columns": False,
         "report_to": ["none"],
-        "ddp_find_unused_parameters": True
+        "ddp_find_unused_parameters": True,
+        "disable_tqdm": True
     }
     
     # Automatically adjust gradient_accumulation_steps to maintain a constant target effective batch size

@@ -17,15 +17,19 @@ def run_command_live(cmd, cwd=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,
+        bufsize=0, # Unbuffered pipe
         cwd=cwd
     )
     
-    # Read output line-by-line as it streams
-    for line in iter(process.stdout.readline, ""):
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        
+    # Read output character-by-character to stream progress bars (\r) and logs (\n) in real-time
+    while True:
+        char = process.stdout.read(1)
+        if not char:
+            break
+        sys.stdout.write(char)
+        if char in ('\n', '\r'):
+            sys.stdout.flush()
+            
     process.wait()
     if process.returncode != 0:
         raise subprocess.CalledProcessError(process.returncode, cmd)
