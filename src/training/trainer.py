@@ -1063,7 +1063,7 @@ def run_training(args, config, is_tpu=False, index=0):
             logger.info(f"Saving best model to {output_dir}/best_model")
             processor.save_pretrained(f"{output_dir}/best_model")
             if is_gemma:
-                model.save_pretrained(f"{output_dir}/best_model")
+                trainer.model.save_pretrained(f"{output_dir}/best_model")
             else:
                 # Save the consolidated/compiled weights on Core 0
                 xm.save(model.state_dict(), f"{output_dir}/best_model/pytorch_model.bin")
@@ -1087,7 +1087,10 @@ def run_training(args, config, is_tpu=False, index=0):
         if is_main_process:
             logger.info(f"Saving best model to {output_dir}/best_model")
             processor.save_pretrained(f"{output_dir}/best_model")
-            model.save_pretrained(f"{output_dir}/best_model")
+            if is_gemma:
+                trainer.model.save_pretrained(f"{output_dir}/best_model")
+            else:
+                model.save_pretrained(f"{output_dir}/best_model")
             
             # Copy best model to Kaggle working output directory for download
             if get_outputs_dir() != "outputs" and os.path.exists("/kaggle/working"):
