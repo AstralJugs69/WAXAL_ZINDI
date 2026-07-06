@@ -108,7 +108,7 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
     processed_count = 0
     for audio_id in test_ids_shard:
         processed_count += 1
-        if processed_count % 100 == 0:
+        if processed_count % 10 == 0:
             worker_logger.info(f"[Worker {worker_id}] Transcribed {processed_count}/{len(test_ids_shard)} files ({(processed_count/len(test_ids_shard)):.1%})...")
             
         audio_data = audio_dict_shard.get(audio_id)
