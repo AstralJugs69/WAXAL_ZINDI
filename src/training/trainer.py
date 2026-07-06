@@ -831,7 +831,7 @@ def run_training(args, config, is_tpu=False, index=0):
     # Dynamic Mixed Precision and Activation Checkpointing Resolver
     bf16_active = is_tpu
     fp16_active = train_args["fp16"] and not is_tpu and torch.cuda.is_available()
-    grad_checkpointing = train_args["gradient_checkpointing"] and not is_tpu
+    grad_checkpointing = train_args["gradient_checkpointing"]
     
     if not is_tpu and torch.cuda.is_available():
         # Enable hardware-native BF16 mixed-precision on Ampere+ GPUs (A100, H100, RTX 30/40) for massive speedups
@@ -875,8 +875,36 @@ def run_training(args, config, is_tpu=False, index=0):
         "ddp_find_unused_parameters": True
     }
     
-    # Automatically adjust gradient_accumulation_steps on GPU to maintain a constant target effective batch size
-    if not is_tpu and torch.cuda.is_available():
+    # Automatically adjust gradient_accumulation_steps to maintain a constant target effective batch size
+    if is_tpu:
+        import torch_xla.core.xla_model as xm
+        world_size = xm.xrt_world_size()
+        
+        orig_batch_size = training_kwargs["per_device_train_batch_size"]
+        if is_gemma:
+            target_batch_size = 2 # Safe batch size for Gemma 3n on 16GB TPU core
+        else:
+            target_batch_size = 8 # Safe batch size for MMS on 16GB TPU core
+            
+        training_kwargs["per_device_train_batch_size"] = target_batch_size
+        training_kwargs["per_device_eval_batch_size"] = max(1, target_batch_size)
+        
+        if is_main_process and target_batch_size != orig_batch_size:
+            logger.info(f"TPU detected (16GB HBM per core). Dynamically scaled batch size from {orig_batch_size} to {target_batch_size} for optimal resource utilization.")
+            
+        per_device_batch = training_kwargs["per_device_train_batch_size"]
+        target_effective_batch = train_args.get("target_effective_batch", 16)
+        accum_steps = max(1, target_effective_batch // (per_device_batch * world_size))
+        training_kwargs["gradient_accumulation_steps"] = accum_steps
+        if is_main_process:
+            logger.info(
+                f"Dynamic Hyperparameter Alignment: Active TPU Cores={world_size} | "
+                f"Per-device Batch={per_device_batch} | "
+                f"Gradient Accumulation Steps={accum_steps} | "
+                f"Effective Batch Size={per_device_batch * world_size * accum_steps}"
+            )
+            
+    elif torch.cuda.is_available():
         if torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
         else:
@@ -1033,9 +1061,12 @@ def run_training(args, config, is_tpu=False, index=0):
         if index == 0:
             logger.info(f"Saving best model to {output_dir}/best_model")
             processor.save_pretrained(f"{output_dir}/best_model")
-            # Save the consolidated/compiled weights on Core 0
-            xm.save(model.state_dict(), f"{output_dir}/best_model/pytorch_model.bin")
-            model.config.save_pretrained(f"{output_dir}/best_model")
+            if is_gemma:
+                model.save_pretrained(f"{output_dir}/best_model")
+            else:
+                # Save the consolidated/compiled weights on Core 0
+                xm.save(model.state_dict(), f"{output_dir}/best_model/pytorch_model.bin")
+                model.config.save_pretrained(f"{output_dir}/best_model")
             
             # Copy best model to Kaggle working output directory for download
             if get_outputs_dir() != "outputs" and os.path.exists("/kaggle/working"):
