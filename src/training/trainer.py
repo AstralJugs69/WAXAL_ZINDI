@@ -1037,9 +1037,12 @@ def run_training(args, config, is_tpu=False, index=0):
             "data_collator": data_collator,
             "train_dataset": shuffled_train,
             "eval_dataset": val_ds_fixed,
-            "peft_config": peft_config,
             "callbacks": [obs_callback, gc_callback]
         }
+        if isinstance(model, peft.PeftModel):
+            logger.info("Gemma model is already a PEFT adapter. Continuing training without passing a new peft_config.")
+        else:
+            trainer_kwargs["peft_config"] = peft_config
         trainer = _SFTTrainer(**trainer_kwargs)
     else:
         trainer_class = Seq2SeqTrainer if is_seq2seq else Trainer
