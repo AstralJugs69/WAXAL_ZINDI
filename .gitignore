@@ -1,5 +1,4 @@
 src.tar.gz
-outputs/
 __pycache__/
 *.pyc
 kaggle.json
