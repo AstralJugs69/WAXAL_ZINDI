@@ -108,8 +108,6 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
     processed_count = 0
     for audio_id in test_ids_shard:
         processed_count += 1
-        if processed_count % 10 == 0:
-            worker_logger.info(f"[Worker {worker_id}] Transcribed {processed_count}/{len(test_ids_shard)} files ({(processed_count/len(test_ids_shard)):.1%})...")
             
         audio_data = audio_dict_shard.get(audio_id)
         if audio_data is None:
@@ -122,8 +120,12 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
             if sr != 16000:
                 y = librosa.resample(y, orig_sr=sr, target_sr=16000)
                 
-            # Segment audio via VAD to prevent OOM
-            chunks = vad.segment(y, sr=16000)
+            # Skip VAD segmenting for short audios (<20s) to speed up CPU preprocessing
+            duration = len(y) / sr
+            if duration <= 20.0:
+                chunks = [y]
+            else:
+                chunks = vad.segment(y, sr=16000)
             
             # Parse language from ID prefix (e.g. lug_96114 -> lug)
             detected_lang = "lin"
@@ -159,6 +161,7 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                         text=chat_prompt,
                         audio=chunk.flatten(),
                         return_tensors="pt",
+                        padding=False,
                         max_length=2048,
                     )
                     # Move inputs to assigned device and dtype
@@ -171,6 +174,8 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                             **inputs,
                             max_new_tokens=128,
                             pad_token_id=processor.tokenizer.pad_token_id,
+                            use_cache=True,
+                            do_sample=False,
                         )
                     input_len = inputs["input_ids"].shape[1]
                     chunk_text = processor.tokenizer.decode(
@@ -193,7 +198,9 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                 if normalized_chunk:
                     transcriptions.append(normalized_chunk)
                     
-            predictions[audio_id] = " ".join(transcriptions)
+            final_text = " ".join(transcriptions)
+            predictions[audio_id] = final_text
+            worker_logger.info(f"[Worker {worker_id}] Transcribed {audio_id} ({(processed_count/len(test_ids_shard)):.1%}): '{final_text}'")
         except Exception as e:
             worker_logger.error(f"[Worker {worker_id}] Failed to transcribe {audio_id}: {e}")
             predictions[audio_id] = ""
@@ -245,9 +252,9 @@ def main():
     # Determine GPU counts and configure parallel processes
     num_gpus = torch.cuda.device_count()
     if num_gpus > 0:
-        # Launch 2 parallel processes per GPU to avoid maxing out VRAM
-        num_workers = num_gpus * 2
-        logger.info(f"Detected {num_gpus} GPUs. Launching {num_workers} parallel workers (2 per GPU)...")
+        # Launch 4 parallel processes per GPU to saturate CUDA Tensor Cores without OOMing
+        num_workers = num_gpus * 4
+        logger.info(f"Detected {num_gpus} GPUs. Launching {num_workers} parallel workers (4 per GPU)...")
     else:
         num_workers = 2
         logger.info(f"No GPUs detected. Launching {num_workers} CPU-bound workers...")
