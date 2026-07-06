@@ -132,7 +132,11 @@ def _prepare_gemma_inputs(processor, messages, audio, worker_logger=None):
             processor_kwargs={
                 "text_kwargs": {
                     "max_length": GEMMA_MAX_INPUT_TOKENS,
-                }
+                },
+                "audio_kwargs": {
+                    "max_length": 400000,
+                    "truncation": False,
+                },
             },
         )
         if _has_audio_features(inputs):
@@ -154,9 +158,8 @@ def _prepare_gemma_inputs(processor, messages, audio, worker_logger=None):
             audio=[audio],
             return_tensors="pt",
             padding=False,
-            text_kwargs={
-                "max_length": GEMMA_MAX_INPUT_TOKENS,
-            },
+            text_kwargs={"max_length": GEMMA_MAX_INPUT_TOKENS},
+            audio_kwargs={"max_length": 400000, "truncation": False},
         )
     except TypeError:
         return processor(

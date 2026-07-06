@@ -331,6 +331,7 @@ def run_gemma_evaluation(eval_dataset, model, processor, batch_size=1, log_sampl
                     return_tensors="pt",
                     padding=True,
                     text_kwargs={"max_length": 2048},
+                    audio_kwargs={"max_length": 400000, "truncation": False},
                 ).to(device)
             except TypeError:
                 inputs = processor(
