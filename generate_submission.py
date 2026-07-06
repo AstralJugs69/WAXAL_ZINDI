@@ -202,7 +202,7 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                     )
                     inputs = processor(
                         text=chat_prompt,
-                        audio=chunk.flatten(),
+                        audio=[chunk.flatten()],
                         return_tensors="pt",
                         padding=False,
                         max_length=2048,
