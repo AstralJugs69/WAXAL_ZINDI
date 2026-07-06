@@ -92,6 +92,7 @@ def collate_fn(
         audio=audios,
         return_tensors="pt",
         padding=True,
+        max_length=2048,
     )
     batch = {
         k: v.detach().clone() if isinstance(v, torch.Tensor) else v

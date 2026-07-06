@@ -322,6 +322,7 @@ def run_gemma_evaluation(eval_dataset, model, processor, batch_size=4):
             audio=audios,
             return_tensors="pt",
             padding=True,
+            max_length=2048,
         ).to(device)
         
         with torch.no_grad():

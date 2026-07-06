@@ -12,6 +12,7 @@ import multiprocessing as mp
 GEMMA_MODEL_ID = "google/gemma-3n-E2B-it"
 GEMMA_SYSTEM_MESSAGE = "You are an assistant that transcribes speech accurately."
 GEMMA_USER_MESSAGE = "Please transcribe this audio."
+GEMMA_MAX_INPUT_TOKENS = 2048
 NO_AUDIO_REFUSAL_MARKERS = (
     "no audio provided",
     "please provide the audio",
@@ -100,6 +101,7 @@ def _prepare_gemma_inputs(processor, messages, audio, worker_logger=None):
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
+            max_length=GEMMA_MAX_INPUT_TOKENS,
         )
         if _has_audio_features(inputs):
             return inputs
@@ -119,6 +121,7 @@ def _prepare_gemma_inputs(processor, messages, audio, worker_logger=None):
         audio=[audio],
         return_tensors="pt",
         padding=False,
+        max_length=GEMMA_MAX_INPUT_TOKENS,
     )
 
 
