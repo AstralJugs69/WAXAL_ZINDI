@@ -227,6 +227,7 @@ def main():
                         text=chat_prompt,
                         audio=chunk.flatten(),
                         return_tensors="pt",
+                        max_length=2048,
                     ).to(device)
                     
                     if hasattr(model, "dtype"):
