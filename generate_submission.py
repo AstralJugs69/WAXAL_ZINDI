@@ -87,9 +87,7 @@ def main():
     # Extract test IDs as a list
     test_ids = list(test_df["id"].dropna())
     
-    # Scan current directory and /kaggle/input
-    audio_dir = find_test_audio_dir([".", "/kaggle/input"], test_ids)
-    logger.info(f"Test audio directory: {audio_dir}")
+
     
     # 2. Define target languages
     target_languages = ["lin", "sna", "lug"]
@@ -156,29 +154,40 @@ def main():
     lid = LanguageIdentifier(target_languages=target_languages)
     vad = VADSegmenter()
     
-    # 3. Perform Inference
+    # 3. Load all test audio from HuggingFace dataset
+    import datasets
+    audio_dict = {}
+    for lang in ["lin", "sna", "lug"]:
+        logger.info(f"Loading test split from HF Hub for {lang}...")
+        try:
+            lang_test = datasets.load_dataset("google/WaxalNLP", name=f"{lang}_asr", split="test")
+            for ex in lang_test:
+                ex_id = ex.get("id") or ex.get("client_id") or ex.get("speaker_id")
+                if ex_id:
+                    audio_dict[ex_id] = ex["audio"]
+            logger.info(f"Successfully loaded {len(lang_test)} test examples for {lang}")
+        except Exception as e:
+            logger.warning(f"Failed to load test split for {lang}: {e}")
+            
+    # 4. Perform Inference
     predictions = []
-    logger.info(f"Starting inference on {len(test_df)} test files...")
+    logger.info(f"Starting inference on {len(test_df)} test examples...")
     
     for idx, row in tqdm(test_df.iterrows(), total=len(test_df)):
         audio_id = row["id"]
+        audio_data = audio_dict.get(audio_id)
         
-        # Resolve audio file path
-        audio_path = None
-        for ext in [".mp3", ".wav", ".m4a", ""]:
-            temp_path = os.path.join(audio_dir, f"{audio_id}{ext}")
-            if os.path.exists(temp_path):
-                audio_path = temp_path
-                break
-                
-        if not audio_path:
-            logger.warning(f"Could not find audio file for ID: {audio_id}. Skipping.")
+        if audio_data is None:
+            logger.warning(f"Could not find audio data in HF test set for ID: {audio_id}. Skipping.")
             predictions.append({"ID": audio_id, "Target": ""})
             continue
             
         try:
-            # Load audio at 16kHz mono
-            y, sr = librosa.load(audio_path, sr=16000)
+            # Get raw audio array and sampling rate
+            y = np.asarray(audio_data["array"]).flatten()
+            sr = audio_data["sampling_rate"]
+            if sr != 16000:
+                y = librosa.resample(y, orig_sr=sr, target_sr=16000)
             
             # Segment audio via VAD to prevent OOM
             chunks = vad.segment(y, sr=16000)
