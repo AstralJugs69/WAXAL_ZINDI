@@ -240,9 +240,9 @@ def main():
     # Determine GPU counts and configure parallel processes
     num_gpus = torch.cuda.device_count()
     if num_gpus > 0:
-        # Launch 4 parallel processes per GPU to saturate CUDA Tensor Cores without OOMing
-        num_workers = num_gpus * 4
-        logger.info(f"Detected {num_gpus} GPUs. Launching {num_workers} parallel workers (4 per GPU)...")
+        # Launch 2 parallel processes per GPU to avoid maxing out VRAM
+        num_workers = num_gpus * 2
+        logger.info(f"Detected {num_gpus} GPUs. Launching {num_workers} parallel workers (2 per GPU)...")
     else:
         num_workers = 2
         logger.info(f"No GPUs detected. Launching {num_workers} CPU-bound workers...")
