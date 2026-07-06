@@ -29,6 +29,11 @@ fi
 chmod +x run_lightning.py
 chmod +x scripts/run_training.sh
 
+# Persist checkpoints in the repository workspace instead of ephemeral /tmp.
+mkdir -p outputs
+export WAXAL_OUTPUTS_DIR="${WAXAL_OUTPUTS_DIR:-$(pwd)/outputs}"
+echo "Using checkpoint/output directory: $WAXAL_OUTPUTS_DIR"
+
 # 2. Extract arguments or use defaults
 CONFIG=${1:-"config/base_gemma.yaml"}
 FOLD=${2:-0}

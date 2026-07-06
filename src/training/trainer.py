@@ -63,6 +63,7 @@ import logging
 import torch
 import numpy as np
 import sys
+from pathlib import Path
 
 # Dynamic Numba-NumPy 2.x compatibility resolver
 # Eagerly imports librosa to trigger all lazy Numba ufunc decorations, patching missing NumPy 2.x attributes on-the-fly.
@@ -159,11 +160,13 @@ from src.models.mms_model import get_mms_model_with_adapter, load_processor_for_
 from src.models.whisper_model import get_whisper_lora_model
 
 def get_outputs_dir():
-    if os.path.exists("/kaggle/temp"):
-        return "/kaggle/temp/outputs"
-    elif os.path.exists("/tmp"):
-        return "/tmp/outputs"
-    return "outputs"
+    outputs_dir = os.environ.get("WAXAL_OUTPUTS_DIR")
+    if outputs_dir:
+        path = Path(outputs_dir).expanduser().resolve()
+    else:
+        path = Path(__file__).resolve().parents[2] / "outputs"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 # Try PyTorch/XLA imports conditionally for TPU support
 try:

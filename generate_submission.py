@@ -8,6 +8,7 @@ import torch
 import librosa
 from tqdm import tqdm
 import multiprocessing as mp
+from pathlib import Path
 
 GEMMA_MODEL_ID = "google/gemma-3n-E2B-it"
 GEMMA_SYSTEM_MESSAGE = "You are an assistant that transcribes speech accurately."
@@ -23,11 +24,13 @@ NO_AUDIO_REFUSAL_MARKERS = (
 )
 
 def get_outputs_dir():
-    if os.path.exists("/kaggle/temp/outputs"):
-        return "/kaggle/temp/outputs"
-    elif os.path.exists("/tmp/outputs"):
-        return "/tmp/outputs"
-    return "outputs"
+    outputs_dir = os.environ.get("WAXAL_OUTPUTS_DIR")
+    if outputs_dir:
+        path = Path(outputs_dir).expanduser().resolve()
+    else:
+        path = Path(__file__).resolve().parent / "outputs"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -305,6 +308,82 @@ def _load_gemma_model_and_processor(checkpoint_dir, device_map, hf_token, worker
     )
     return model, processor
 
+
+def _read_expected_submission_ids(test_csv_path):
+    sample_paths = [
+        "SampleSubmission.csv",
+        os.path.join(os.path.dirname(test_csv_path), "SampleSubmission.csv"),
+    ]
+    sample_path = next((path for path in sample_paths if os.path.exists(path)), None)
+    source_path = sample_path or test_csv_path
+
+    df = pd.read_csv(source_path, dtype=str)
+    id_col = "ID" if "ID" in df.columns else "id" if "id" in df.columns else df.columns[0]
+    ids = df[id_col].dropna().astype(str).str.strip().tolist()
+
+    seen = set()
+    duplicates = []
+    for audio_id in ids:
+        if audio_id in seen:
+            duplicates.append(audio_id)
+        seen.add(audio_id)
+    if duplicates:
+        preview = ", ".join(duplicates[:10])
+        raise ValueError(f"{source_path} contains duplicate IDs: {preview}")
+
+    logger.info(f"Loaded {len(ids)} expected submission IDs from {source_path}")
+    return ids
+
+
+def _write_validated_submission(expected_ids, worker_results, output_path="submission.csv"):
+    combined_predictions = {}
+    duplicate_predictions = []
+
+    for worker_id, predictions in worker_results.items():
+        if not predictions:
+            logger.warning(f"Worker {worker_id} returned no predictions.")
+            continue
+        for audio_id, transcription in dict(predictions).items():
+            audio_id = str(audio_id).strip()
+            if audio_id in combined_predictions:
+                duplicate_predictions.append(audio_id)
+                continue
+            combined_predictions[audio_id] = "" if transcription is None else str(transcription)
+
+    expected_set = set(expected_ids)
+    extra_ids = sorted(set(combined_predictions) - expected_set)
+    if extra_ids:
+        logger.warning(f"Ignoring {len(extra_ids)} predictions for IDs not present in expected submission. First few: {extra_ids[:10]}")
+    if duplicate_predictions:
+        logger.warning(f"Observed duplicate worker predictions for {len(set(duplicate_predictions))} IDs. First few: {sorted(set(duplicate_predictions))[:10]}")
+
+    rows = [
+        {"ID": audio_id, "Target": combined_predictions.get(audio_id, "")}
+        for audio_id in expected_ids
+    ]
+    submission_df = pd.DataFrame(rows, columns=["ID", "Target"])
+
+    if len(submission_df) != len(expected_ids):
+        raise RuntimeError(f"Submission row count mismatch: got {len(submission_df)}, expected {len(expected_ids)}")
+    if submission_df["ID"].isna().any():
+        raise RuntimeError("Submission contains null IDs.")
+    if submission_df["ID"].duplicated().any():
+        dupes = submission_df.loc[submission_df["ID"].duplicated(), "ID"].head(10).tolist()
+        raise RuntimeError(f"Submission contains duplicate IDs: {dupes}")
+    missing_ids = [audio_id for audio_id in expected_ids if audio_id not in set(submission_df["ID"])]
+    if missing_ids:
+        raise RuntimeError(f"Submission is missing expected IDs: {missing_ids[:10]}")
+
+    blank_count = int((submission_df["Target"].fillna("").astype(str).str.len() == 0).sum())
+    if blank_count:
+        logger.warning(f"Submission contains {blank_count} blank transcriptions, but no IDs are missing.")
+
+    temp_path = f"{output_path}.tmp"
+    submission_df.to_csv(temp_path, index=False)
+    os.replace(temp_path, output_path)
+    logger.info(f"Validated submission written to {output_path}: {len(submission_df)} rows, 0 missing IDs.")
+
+
 def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audio_dict_shard, return_dict, hf_token):
     """
     Worker function executed in a separate process.
@@ -527,10 +606,7 @@ def main():
             test_csv_path = found[0]
             
     logger.info(f"Loading test CSV from: {test_csv_path}")
-    test_df = parse_robust_csv(test_csv_path)
-    
-    # Extract test IDs as a list
-    test_ids = list(test_df["id"].dropna())
+    test_ids = _read_expected_submission_ids(test_csv_path)
     
     # 2. Define target languages
     target_languages = ["lin", "sna", "lug"]
@@ -603,23 +679,13 @@ def main():
     # Monitor completion of subprocesses
     for p in processes:
         p.join()
+        if p.exitcode != 0:
+            logger.warning(f"Worker process {p.pid} exited with code {p.exitcode}; its missing IDs will be emitted with blank targets.")
 
     logger.info("All parallel workers completed. Compiling final predictions...")
-    
-    # 4. Compile predictions in the original order of Test.csv
-    predictions = []
-    for idx, row in test_df.iterrows():
-        audio_id = row["id"]
-        transcription = ""
-        for w_id in range(num_workers):
-            if return_dict.get(w_id) and audio_id in return_dict[w_id]:
-                transcription = return_dict[w_id][audio_id]
-                break
-        predictions.append({"ID": audio_id, "Target": transcription})
-        
-    # 5. Save to submission CSV
-    submission_df = pd.DataFrame(predictions)
-    submission_df.to_csv("submission.csv", index=False)
+
+    worker_results = {w_id: dict(return_dict.get(w_id, {})) for w_id in range(num_workers)}
+    _write_validated_submission(test_ids, worker_results, output_path="submission.csv")
     logger.info("Successfully generated submission.csv in the correct format!")
 
 if __name__ == "__main__":
