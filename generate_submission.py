@@ -154,20 +154,23 @@ def main():
     lid = LanguageIdentifier(target_languages=target_languages)
     vad = VADSegmenter()
     
-    # 3. Load all test audio from HuggingFace dataset
+    # 3. Load all test audio from HuggingFace dataset (streamed to avoid downloading train parquets)
     import datasets
     audio_dict = {}
     for lang in ["lin", "sna", "lug"]:
-        logger.info(f"Loading test split from HF Hub for {lang}...")
+        logger.info(f"Streaming test split from HF Hub for {lang}...")
         try:
-            lang_test = datasets.load_dataset("google/WaxalNLP", name=f"{lang}_asr", split="test")
+            lang_test = datasets.load_dataset("google/WaxalNLP", name=f"{lang}_asr", split="test", streaming=True)
+            lang_test = lang_test.cast_column("audio", datasets.Audio(sampling_rate=16000))
+            count = 0
             for ex in lang_test:
                 ex_id = ex.get("id") or ex.get("client_id") or ex.get("speaker_id")
                 if ex_id:
                     audio_dict[ex_id] = ex["audio"]
-            logger.info(f"Successfully loaded {len(lang_test)} test examples for {lang}")
+                    count += 1
+            logger.info(f"Successfully mapped {count} streamed test examples for {lang}")
         except Exception as e:
-            logger.warning(f"Failed to load test split for {lang}: {e}")
+            logger.warning(f"Failed to stream test split for {lang}: {e}")
             
     # 4. Perform Inference
     predictions = []
