@@ -25,11 +25,19 @@ from src.inference.pipeline import VADSegmenter
 from src.decoding.ctc_decoder import create_ctc_decoder, decode_logits
 from src.data.dataset import parse_robust_csv, normalize_text
 
-def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audio_dict_shard, return_dict):
+def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audio_dict_shard, return_dict, hf_token):
     """
     Worker function executed in a separate process.
     Loads models on the assigned GPU and transcribes its shard of test audios.
     """
+    import os
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
+    # Set default HF home to persist across Restarts and load cache
+    os.environ["HF_HOME"] = "/teamspace/studios/this_studio/hf_home"
+    os.environ["HF_HUB_CACHE"] = "/teamspace/studios/this_studio/hf_home/hub"
+    os.environ["HF_DATASETS_CACHE"] = "/teamspace/studios/this_studio/hf_home/datasets"
+
     import logging
     # Set up child logger
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -68,7 +76,8 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
             base_model = Gemma3nForConditionalGeneration.from_pretrained(
                 "google/gemma-3n-E2B-it",
                 torch_dtype=torch.bfloat16,
-                device_map=device_map
+                device_map=device_map,
+                token=hf_token
             )
             model = PeftModel.from_pretrained(base_model, custom_gemma_dir)
             processor = AutoProcessor.from_pretrained(custom_gemma_dir)
@@ -278,11 +287,12 @@ def main():
     return_dict = manager.dict()
     processes = []
 
+    hf_token = os.environ.get("HF_TOKEN")
     logger.info("Spawning parallel inference worker processes...")
     for w_id in range(num_workers):
         p = ctx.Process(
             target=worker_inference,
-            args=(w_id, num_gpus, target_languages, shards[w_id], sharded_audio_dicts[w_id], return_dict)
+            args=(w_id, num_gpus, target_languages, shards[w_id], sharded_audio_dicts[w_id], return_dict, hf_token)
         )
         processes.append(p)
         p.start()
