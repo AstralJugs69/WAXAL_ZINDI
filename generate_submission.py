@@ -72,14 +72,46 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
         custom_mms_dir = f"{get_outputs_dir()}/{lang}_mms-300m_fold0/best_model"
         
         if os.path.exists(custom_gemma_dir):
-            from peft import PeftModel
+            from peft import get_peft_model, LoraConfig
+            from safetensors.torch import load_file
+            
             base_model = Gemma3nForConditionalGeneration.from_pretrained(
                 "google/gemma-3n-E2B-it",
                 torch_dtype=torch.bfloat16,
                 device_map=device_map,
                 token=hf_token
             )
-            model = PeftModel.from_pretrained(base_model, custom_gemma_dir)
+            
+            # Recreate the PEFT configuration used during training
+            peft_config = LoraConfig(
+                task_type="CAUSAL_LM",
+                r=8,
+                lora_alpha=16,
+                lora_dropout=0.0,
+                target_modules=["v_proj", "o_proj"],
+                bias="none"
+            )
+            model = get_peft_model(base_model, peft_config)
+            
+            sf_path = os.path.join(custom_gemma_dir, "model.safetensors")
+            bin_path = os.path.join(custom_gemma_dir, "pytorch_model.bin")
+            
+            if os.path.exists(sf_path):
+                state_dict = load_file(sf_path)
+            elif os.path.exists(bin_path):
+                state_dict = torch.load(bin_path, map_location="cpu")
+            else:
+                raise FileNotFoundError(f"Could not find model weights in {custom_gemma_dir}")
+                
+            aligned_state_dict = {}
+            for k, v in state_dict.items():
+                if not k.startswith("base_model."):
+                    aligned_key = "base_model." + k
+                else:
+                    aligned_key = k
+                aligned_state_dict[aligned_key] = v
+                
+            model.load_state_dict(aligned_state_dict, strict=True)
             processor = AutoProcessor.from_pretrained(custom_gemma_dir)
             model_families[lang] = "gemma"
             decoders[lang] = None
