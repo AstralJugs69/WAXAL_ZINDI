@@ -36,6 +36,12 @@ HF_TOKEN=${3:-$HF_TOKEN}
 KAGGLE_USER=${4:-$KAGGLE_USERNAME}
 KAGGLE_KEY=${5:-$KAGGLE_KEY}
 
+# TPU auto-detection
+TPU_FLAG=""
+if [ -n "$TPU_NAME" ] || [ -d "/usr/share/tpu-support" ] || [ -f "/usr/lib/libtpu.so" ]; then
+    echo "TPU environment detected. Enabling --tpu flag."
+    TPU_FLAG="--tpu"
+fi
 
 # 3. Train all three languages sequentially (Lingala, Shona, Luganda)
 for LANG in lin sna lug; do
@@ -58,7 +64,8 @@ for LANG in lin sna lug; do
       --git_poll_interval 5 \
       --hf_token "$HF_TOKEN" \
       --kaggle_username "$KAGGLE_USER" \
-      --kaggle_key "$KAGGLE_KEY"
+      --kaggle_key "$KAGGLE_KEY" \
+      $TPU_FLAG
 done
 
 # 4. Generate the final submission file using all trained checkpoints

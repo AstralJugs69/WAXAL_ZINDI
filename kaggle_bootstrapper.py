@@ -244,8 +244,15 @@ def main():
         print("Notice: hf_cache.tar.aa chunk was not found in standard directories. Skipping local cache extraction.")
 
     print("\n=== Step 4: Kickstarting Model Training Pipeline ===")
-    tpu_flag = "--tpu" if tpu_active else ""
-    run_command_live(["bash", "scripts/run_training.sh", "config/base_mms.yaml", "0", "lin", tpu_flag])
+    # Run the multilingual sequential runner for all three languages
+    run_command_live([
+        "bash", "run_all_languages.sh",
+        "config/base_gemma.yaml",
+        "0",
+        hf_token or "",
+        os.environ.get("KAGGLE_USERNAME", ""),
+        os.environ.get("KAGGLE_KEY", "")
+    ])
 
     print("\n=== Bootstrapping and Training Pipeline Completed Successfully ===")
 
