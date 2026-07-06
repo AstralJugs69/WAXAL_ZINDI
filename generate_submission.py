@@ -153,11 +153,11 @@ def main():
     # Initialize VAD
     vad = VADSegmenter()
     
-    # 3. Load all test audio from HuggingFace dataset (streamed to avoid downloading train parquets)
+    # 3. Load all test audio from HuggingFace dataset (streamed and eagerly cached in RAM to avoid lazy downloads during inference)
     import datasets
     audio_dict = {}
     for lang in ["lin", "sna", "lug"]:
-        logger.info(f"Streaming test split from HF Hub for {lang}...")
+        logger.info(f"Streaming and caching test split from HF Hub for {lang}...")
         try:
             lang_test = datasets.load_dataset("google/WaxalNLP", name=f"{lang}_asr", split="test", streaming=True)
             lang_test = lang_test.cast_column("audio", datasets.Audio(sampling_rate=16000))
@@ -165,11 +165,15 @@ def main():
             for ex in lang_test:
                 ex_id = ex.get("id") or ex.get("client_id") or ex.get("speaker_id")
                 if ex_id:
-                    audio_dict[ex_id] = ex["audio"]
+                    # Eagerly retrieve and copy the raw audio array to release file buffers and prevent lazy HTTP requests
+                    audio_dict[ex_id] = {
+                        "array": np.asarray(ex["audio"]["array"]).copy(),
+                        "sampling_rate": ex["audio"]["sampling_rate"]
+                    }
                     count += 1
-            logger.info(f"Successfully mapped {count} streamed test examples for {lang}")
+            logger.info(f"Successfully cached {count} test examples in RAM for {lang}")
         except Exception as e:
-            logger.warning(f"Failed to stream test split for {lang}: {e}")
+            logger.warning(f"Failed to cache test split for {lang}: {e}")
             
     # 4. Perform Inference
     predictions = []
