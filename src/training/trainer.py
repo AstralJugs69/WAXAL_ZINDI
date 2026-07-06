@@ -276,7 +276,7 @@ def get_compute_metrics_fn(processor, is_seq2seq):
     return compute_metrics
 
 
-def run_gemma_evaluation(eval_dataset, model, processor, batch_size=4):
+def run_gemma_evaluation(eval_dataset, model, processor, batch_size=1, log_samples=5):
     """
     Decodes audio samples using Gemma 3n's native autoregressive generation
     and evaluates transcripts against references using WER and CER.
@@ -287,61 +287,80 @@ def run_gemma_evaluation(eval_dataset, model, processor, batch_size=4):
     references = []
     predictions = []
     
-    for batch in eval_dataset.batch(batch_size=batch_size):
-        transcriptions = batch.get("transcription") or batch.get("normalized_transcription") or []
-        
-        # Collate audio arrays
-        audios = []
-        for audio_info in batch["audio"]:
-            if isinstance(audio_info, dict) and "array" in audio_info:
-                arr = np.asarray(audio_info["array"]).flatten()
-            else:
-                arr = np.asarray(audio_info).flatten()
-            audios.append(arr)
-            
-        # Apply chat templates dynamically
-        texts = []
-        for i, transcript in enumerate(transcriptions):
-            messages = [
-                {
-                    "role": "system",
-                    "content": [{"type": "text", "text": "You are an assistant that transcribes speech accurately."}],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "audio", "audio": audios[i]},
-                        {"type": "text", "text": "Please transcribe this audio."},
-                    ],
-                }
-            ]
-            chat_prompt = processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+    original_padding_side = getattr(processor.tokenizer, "padding_side", "right")
+    processor.tokenizer.padding_side = "left"
+
+    try:
+        for batch in eval_dataset.batch(batch_size=batch_size):
+            transcriptions = batch.get("transcription") or batch.get("normalized_transcription") or []
+
+            # Collate audio arrays
+            audios = []
+            for audio_info in batch["audio"]:
+                if isinstance(audio_info, dict) and "array" in audio_info:
+                    arr = np.asarray(audio_info["array"]).flatten()
+                else:
+                    arr = np.asarray(audio_info).flatten()
+                audios.append(arr)
+
+            # Apply chat templates dynamically
+            texts = []
+            for i, transcript in enumerate(transcriptions):
+                messages = [
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": "You are an assistant that transcribes speech accurately."}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "audio", "audio": audios[i]},
+                            {"type": "text", "text": "Please transcribe this audio."},
+                        ],
+                    }
+                ]
+                chat_prompt = processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                texts.append(chat_prompt)
+
+            try:
+                inputs = processor(
+                    text=texts,
+                    audio=audios,
+                    return_tensors="pt",
+                    padding=True,
+                    text_kwargs={"max_length": 2048},
+                ).to(device)
+            except TypeError:
+                inputs = processor(
+                    text=texts,
+                    audio=audios,
+                    return_tensors="pt",
+                    padding=True,
+                    max_length=2048,
+                ).to(device)
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=96,
+                    pad_token_id=processor.tokenizer.pad_token_id,
+                    eos_token_id=processor.tokenizer.eos_token_id,
+                    do_sample=False,
+                    repetition_penalty=1.15,
+                    no_repeat_ngram_size=4,
+                )
+
+            input_len = inputs.input_ids.shape[1]
+            decoded = processor.tokenizer.batch_decode(
+                outputs[:, input_len:], skip_special_tokens=True
             )
-            texts.append(chat_prompt)
-            
-        inputs = processor(
-            text=texts,
-            audio=audios,
-            return_tensors="pt",
-            padding=True,
-            max_length=2048,
-        ).to(device)
-        
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=128,
-                pad_token_id=processor.tokenizer.pad_token_id,
-            )
-            
-        input_len = inputs.input_ids.shape[1]
-        decoded = processor.tokenizer.batch_decode(
-            outputs[:, input_len:], skip_special_tokens=True
-        )
-        
-        references.extend(transcriptions)
-        predictions.extend([t.strip() for t in decoded])
+
+            references.extend(transcriptions)
+            predictions.extend([t.strip() for t in decoded])
+    finally:
+        processor.tokenizer.padding_side = original_padding_side
         
     refs_normalized = [normalize_text(r) for r in references]
     preds_normalized = [normalize_text(p) for p in predictions]
@@ -358,6 +377,13 @@ def run_gemma_evaluation(eval_dataset, model, processor, batch_size=4):
         
     wer = jiwer.wer(valid_refs, valid_preds)
     cer = jiwer.cer(valid_refs, valid_preds)
+
+    for idx, (ref, pred) in enumerate(zip(valid_refs, valid_preds)):
+        if idx >= log_samples:
+            break
+        logger.info(f"Gemma validation sample {idx + 1} REF: {ref}")
+        logger.info(f"Gemma validation sample {idx + 1} PRD: {pred}")
+
     return {"wer": wer, "cer": cer}
 
 
