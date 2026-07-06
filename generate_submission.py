@@ -111,7 +111,7 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                     aligned_key = k
                 aligned_state_dict[aligned_key] = v
                 
-            model.load_state_dict(aligned_state_dict, strict=True)
+            model.load_state_dict(aligned_state_dict, strict=False)
             processor = AutoProcessor.from_pretrained(custom_gemma_dir)
             model_families[lang] = "gemma"
             decoders[lang] = None
