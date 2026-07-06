@@ -232,8 +232,11 @@ def main():
     os.environ["HF_HUB_CACHE"] = os.path.join(hf_home, "hub")
     os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_home, "datasets")
     
-    # 3. Pull and extract cache
-    download_and_extract_cache(hf_home)
+    # 3. Pull and extract cache (skip on Kaggle since setup is handled by the notebook bootstrapper)
+    if os.path.exists("/kaggle"):
+        print("Kaggle environment detected. Skipping Step 3 (Download/Extract Cache Chunks) in run_lightning.py.")
+    else:
+        download_and_extract_cache(hf_home)
     
     # 4. Make scripts executable
     for script in ["install_dependencies.sh", "run_training.sh", "bootstrap_and_train.py", "run_kaggle.py", "run_lightning.py"]:
