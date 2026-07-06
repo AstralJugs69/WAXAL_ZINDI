@@ -64,11 +64,13 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
         custom_mms_dir = f"{get_outputs_dir()}/{lang}_mms-300m_fold0/best_model"
         
         if os.path.exists(custom_gemma_dir):
-            model = Gemma3nForConditionalGeneration.from_pretrained(
-                custom_gemma_dir,
+            from peft import PeftModel
+            base_model = Gemma3nForConditionalGeneration.from_pretrained(
+                "google/gemma-3n-E2B-it",
                 torch_dtype=torch.bfloat16,
                 device_map=device_map
             )
+            model = PeftModel.from_pretrained(base_model, custom_gemma_dir)
             processor = AutoProcessor.from_pretrained(custom_gemma_dir)
             model_families[lang] = "gemma"
             decoders[lang] = None
