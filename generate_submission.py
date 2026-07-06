@@ -87,6 +87,31 @@ def _has_audio_features(inputs):
     return any(key in inputs for key in audio_feature_keys)
 
 
+def _find_gemma_weight_path(checkpoint_dir):
+    weight_paths = [
+        os.path.join(checkpoint_dir, "adapter_model.safetensors"),
+        os.path.join(checkpoint_dir, "model.safetensors"),
+        os.path.join(checkpoint_dir, "pytorch_model.bin"),
+    ]
+    return next((path for path in weight_paths if os.path.exists(path)), None)
+
+
+def _load_state_dict_file(weight_path):
+    if weight_path is None:
+        return None
+    if weight_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        return load_file(weight_path)
+    return torch.load(weight_path, map_location="cpu")
+
+
+def _looks_like_peft_state_dict(state_dict):
+    if not state_dict:
+        return False
+    return any("lora_" in key or ".base_layer." in key for key in state_dict)
+
+
 def _prepare_gemma_inputs(processor, messages, audio, worker_logger=None):
     """
     Prefer Gemma 3n's processor-level chat template. It inserts the audio soft
@@ -101,7 +126,11 @@ def _prepare_gemma_inputs(processor, messages, audio, worker_logger=None):
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            max_length=GEMMA_MAX_INPUT_TOKENS,
+            processor_kwargs={
+                "text_kwargs": {
+                    "max_length": GEMMA_MAX_INPUT_TOKENS,
+                }
+            },
         )
         if _has_audio_features(inputs):
             return inputs
@@ -116,13 +145,93 @@ def _prepare_gemma_inputs(processor, messages, audio, worker_logger=None):
         tokenize=False,
         add_generation_prompt=True,
     )
-    return processor(
-        text=chat_prompt,
-        audio=[audio],
-        return_tensors="pt",
-        padding=False,
-        max_length=GEMMA_MAX_INPUT_TOKENS,
+    try:
+        return processor(
+            text=chat_prompt,
+            audio=[audio],
+            return_tensors="pt",
+            padding=False,
+            text_kwargs={
+                "max_length": GEMMA_MAX_INPUT_TOKENS,
+            },
+        )
+    except TypeError:
+        return processor(
+            text=chat_prompt,
+            audio=[audio],
+            return_tensors="pt",
+            padding=False,
+            max_length=GEMMA_MAX_INPUT_TOKENS,
+        )
+
+
+def _build_gemma_peft_model(device_map, hf_token):
+    from peft import get_peft_model, LoraConfig
+    from transformers import Gemma3nForConditionalGeneration
+
+    base_model = Gemma3nForConditionalGeneration.from_pretrained(
+        GEMMA_MODEL_ID,
+        torch_dtype=torch.bfloat16,
+        device_map=device_map,
+        token=hf_token,
     )
+    peft_config = LoraConfig(
+        task_type="CAUSAL_LM",
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.0,
+        target_modules=["v_proj", "o_proj"],
+        bias="none",
+    )
+    return get_peft_model(base_model, peft_config)
+
+
+def _with_base_model_prefix(state_dict):
+    prefixed = {}
+    for key, value in state_dict.items():
+        prefixed[key if key.startswith("base_model.") else f"base_model.{key}"] = value
+    return prefixed
+
+
+def _load_legacy_gemma_lora_checkpoint(weight_path, device_map, hf_token, worker_logger):
+    state_dict = _load_state_dict_file(weight_path)
+    if not _looks_like_peft_state_dict(state_dict):
+        return None
+
+    model = _build_gemma_peft_model(device_map, hf_token)
+    lora_key_count = sum(1 for key in state_dict if "lora_" in key)
+    candidates = [
+        ("as-saved", state_dict),
+        ("base_model-prefixed", _with_base_model_prefix(state_dict)),
+    ]
+
+    best = None
+    for candidate_name, candidate_state in candidates:
+        result = model.load_state_dict(candidate_state, strict=False)
+        unexpected_lora = [key for key in result.unexpected_keys if "lora_" in key]
+        missing_lora = [key for key in result.missing_keys if "lora_" in key]
+        matched_lora = sum(1 for key in candidate_state if "lora_" in key) - len(unexpected_lora)
+        score = (matched_lora, -len(missing_lora), -len(unexpected_lora))
+        if best is None or score > best[0]:
+            best = (score, candidate_name, candidate_state, result, matched_lora, missing_lora, unexpected_lora)
+
+    _, candidate_name, candidate_state, result, matched_lora, missing_lora, unexpected_lora = best
+    # Reload the winning mapping because trial loads above may partially mutate the model.
+    result = model.load_state_dict(candidate_state, strict=False)
+    matched_lora = sum(1 for key in candidate_state if "lora_" in key) - len(
+        [key for key in result.unexpected_keys if "lora_" in key]
+    )
+    if lora_key_count and matched_lora <= 0:
+        raise RuntimeError(
+            f"Found {lora_key_count} LoRA keys in {weight_path}, but none matched the reconstructed PEFT model."
+        )
+
+    worker_logger.info(
+        f"Loaded legacy Gemma LoRA checkpoint from {weight_path} using {candidate_name}; "
+        f"matched_lora={matched_lora}/{lora_key_count}, "
+        f"missing={len(result.missing_keys)}, unexpected={len(result.unexpected_keys)}"
+    )
+    return model
 
 
 def _load_gemma_model_and_processor(checkpoint_dir, device_map, hf_token, worker_logger):
@@ -144,6 +253,8 @@ def _load_gemma_model_and_processor(checkpoint_dir, device_map, hf_token, worker
     if hasattr(processor, "tokenizer"):
         processor.tokenizer.padding_side = "right"
 
+    weight_path = _find_gemma_weight_path(checkpoint_dir)
+
     if os.path.exists(os.path.join(checkpoint_dir, "adapter_config.json")):
         from peft import PeftModel
 
@@ -156,6 +267,11 @@ def _load_gemma_model_and_processor(checkpoint_dir, device_map, hf_token, worker
         model = PeftModel.from_pretrained(base_model, checkpoint_dir, is_trainable=False)
         worker_logger.info(f"Loaded Gemma PEFT adapter checkpoint from {checkpoint_dir}")
         return model, processor
+
+    if weight_path is not None:
+        legacy_lora_model = _load_legacy_gemma_lora_checkpoint(weight_path, device_map, hf_token, worker_logger)
+        if legacy_lora_model is not None:
+            return legacy_lora_model, processor
 
     try:
         model = Gemma3nForConditionalGeneration.from_pretrained(
@@ -172,41 +288,15 @@ def _load_gemma_model_and_processor(checkpoint_dir, device_map, hf_token, worker
             "Trying legacy state-dict loading."
         )
 
-    from peft import get_peft_model, LoraConfig
-    from safetensors.torch import load_file
-
-    base_model = Gemma3nForConditionalGeneration.from_pretrained(
-        GEMMA_MODEL_ID,
-        torch_dtype=torch.bfloat16,
-        device_map=device_map,
-        token=hf_token,
-    )
-    peft_config = LoraConfig(
-        task_type="CAUSAL_LM",
-        r=8,
-        lora_alpha=16,
-        lora_dropout=0.0,
-        target_modules=["v_proj", "o_proj"],
-        bias="none",
-    )
-    model = get_peft_model(base_model, peft_config)
-
-    weight_paths = [
-        os.path.join(checkpoint_dir, "adapter_model.safetensors"),
-        os.path.join(checkpoint_dir, "model.safetensors"),
-        os.path.join(checkpoint_dir, "pytorch_model.bin"),
-    ]
-    weight_path = next((path for path in weight_paths if os.path.exists(path)), None)
     if weight_path is None:
         raise FileNotFoundError(f"Could not find Gemma weights in {checkpoint_dir}")
 
-    if weight_path.endswith(".safetensors"):
-        state_dict = load_file(weight_path)
-    else:
-        state_dict = torch.load(weight_path, map_location="cpu")
+    model = _build_gemma_peft_model(device_map, hf_token)
+    state_dict = _load_state_dict_file(weight_path)
 
-    load_result = model.load_state_dict(state_dict, strict=False)
-    loaded_lora_keys = sum(1 for key in state_dict if "lora_" in key)
+    aligned_state_dict = _with_base_model_prefix(state_dict)
+    load_result = model.load_state_dict(aligned_state_dict, strict=False)
+    loaded_lora_keys = sum(1 for key in aligned_state_dict if "lora_" in key)
     if loaded_lora_keys == 0:
         worker_logger.warning(f"Legacy Gemma checkpoint {weight_path} did not contain LoRA keys.")
     worker_logger.info(
