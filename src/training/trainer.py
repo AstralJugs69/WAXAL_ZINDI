@@ -960,7 +960,9 @@ def run_training(args, config, is_tpu=False, index=0):
             
     if is_gemma:
         training_kwargs["dataset_kwargs"] = {"skip_prepare_dataset": True}
-        training_kwargs["max_seq_length"] = train_args.get("max_seq_length", 64)
+        gemma_max_length = train_args.get("max_length", train_args.get("max_seq_length", 2048))
+        training_kwargs["max_length"] = gemma_max_length
+        training_kwargs["max_seq_length"] = gemma_max_length
         training_kwargs["packing"] = False
         training_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
     elif is_seq2seq:
@@ -1115,7 +1117,7 @@ def run_training(args, config, is_tpu=False, index=0):
         if is_gemma and is_main_process:
             logger.info("Running post-training evaluation on validation set...")
             try:
-                val_metrics = run_gemma_evaluation(val_ds_fixed, model, processor)
+                val_metrics = run_gemma_evaluation(val_ds_fixed, trainer.model, processor)
                 logger.info(f"📊 Gemma ASR Validation Metrics:")
                 logger.info(f"   WER : {val_metrics['wer']:.2%}")
                 logger.info(f"   CER : {val_metrics['cer']:.2%}")

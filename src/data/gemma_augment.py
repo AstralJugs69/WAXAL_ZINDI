@@ -34,6 +34,19 @@ def _mask_labels(
     return labels
 
 
+def _processor_call(proc, **kwargs):
+    try:
+        return proc(
+            **kwargs,
+            text_kwargs={"max_length": 2048},
+        )
+    except TypeError:
+        return proc(
+            **kwargs,
+            max_length=2048,
+        )
+
+
 def collate_fn(
     examples: Sequence[Mapping[str, Any]],
     proc: transformers.AutoProcessor,
@@ -42,7 +55,8 @@ def collate_fn(
     user_message: str = "Please transcribe this audio.",
 ) -> dict[str, Any]:
     """Collates a list of examples into a training batch by dynamically applying chat templates."""
-    texts = []
+    full_texts = []
+    prompt_texts = []
     audios = []
     
     for ex in examples:
@@ -62,9 +76,8 @@ def collate_fn(
             
         audios.append(arr)
         
-        # Format the text prompt using the chat template dynamically
         transcription = ex.get("transcription") or ex.get("normalized_transcription") or ""
-        messages = [
+        prompt_messages = [
             {
                 "role": "system",
                 "content": [{"type": "text", "text": system_message}],
@@ -76,29 +89,49 @@ def collate_fn(
                     {"type": "text", "text": user_message},
                 ],
             },
+        ]
+        full_messages = [
+            *prompt_messages,
             {
                 "role": "assistant",
                 "content": [{"type": "text", "text": str(transcription)}],
             },
         ]
         
-        chat_prompt = proc.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
+        prompt_texts.append(
+            proc.apply_chat_template(
+                prompt_messages, tokenize=False, add_generation_prompt=True
+            )
         )
-        texts.append(chat_prompt)
+        full_texts.append(
+            proc.apply_chat_template(
+                full_messages, tokenize=False, add_generation_prompt=False
+            )
+        )
 
-    batch = proc(
-        text=texts,
+    batch = _processor_call(
+        proc,
+        text=full_texts,
         audio=audios,
         return_tensors="pt",
         padding=True,
-        max_length=2048,
+    )
+    prompt_batch = _processor_call(
+        proc,
+        text=prompt_texts,
+        audio=audios,
+        return_tensors="pt",
+        padding=True,
     )
     batch = {
         k: v.detach().clone() if isinstance(v, torch.Tensor) else v
         for k, v in batch.items()
     }
-    batch["labels"] = _mask_labels(batch["input_ids"], proc)
+    labels = batch["input_ids"].clone()
+    for row_idx in range(labels.shape[0]):
+        prompt_len = min(int(prompt_batch["attention_mask"][row_idx].sum().item()), labels.shape[1])
+        labels[row_idx, :prompt_len] = -100
+    batch["labels"] = _mask_labels(labels, proc)
     return batch
 
 
