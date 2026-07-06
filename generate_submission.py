@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("inference")
 
 # Import helpers from our codebase
-from src.inference.pipeline import VADSegmenter, LanguageIdentifier
+from src.inference.pipeline import VADSegmenter
 from src.decoding.ctc_decoder import create_ctc_decoder, decode_logits
 from src.data.dataset import parse_robust_csv, normalize_text
 
@@ -150,8 +150,7 @@ def main():
         models[lang] = model
         processors[lang] = processor
         
-    # Load Language Identifier
-    lid = LanguageIdentifier(target_languages=target_languages)
+    # Initialize VAD
     vad = VADSegmenter()
     
     # 3. Load all test audio from HuggingFace dataset (streamed to avoid downloading train parquets)
@@ -195,9 +194,12 @@ def main():
             # Segment audio via VAD to prevent OOM
             chunks = vad.segment(y, sr=16000)
             
-            # Run Language Identification on the longest segment
-            longest_chunk = max(chunks, key=len)
-            detected_lang = lid.identify(longest_chunk, sr=16000)
+            # Parse language from ID prefix (e.g. lug_96114 -> lug)
+            detected_lang = "lin"
+            for possible_lang in ["lin", "sna", "lug"]:
+                if audio_id.startswith(possible_lang + "_"):
+                    detected_lang = possible_lang
+                    break
             
             # Route to model, processor, and decoder
             model = models[detected_lang]
@@ -239,7 +241,7 @@ def main():
                             max_new_tokens=128,
                             pad_token_id=processor.tokenizer.pad_token_id,
                         )
-                    input_len = inputs.input_ids.shape[1]
+                    input_len = inputs["input_ids"].shape[1]
                     chunk_text = processor.tokenizer.decode(
                         outputs[0][input_len:], skip_special_tokens=True
                     )
