@@ -235,20 +235,17 @@ def main():
     run_command_live(["bash", "scripts/install_dependencies.sh"])
 
     print("\n=== Step 3.5: Extracting HuggingFace Cache Chunks ===")
-    if os.path.exists("/kaggle"):
-        print("Kaggle environment detected. Skipping Step 3.5 (HuggingFace Cache Chunks Extraction) since dataset is already attached/mounted.")
-    else:
-        chunks_dir = find_cache_chunks_dir()
-        if chunks_dir:
-            if check_extraction_valid(hf_home):
-                print(f"Valid extraction sentinel found at {hf_home}. Skipping extraction.")
-            else:
-                try:
-                    extract_cache_chunks(chunks_dir, hf_home)
-                except Exception as e:
-                    print(f"Warning: Cache extraction failed: {e}. Training will continue using default Hugging Face download.")
+    chunks_dir = find_cache_chunks_dir()
+    if chunks_dir:
+        if check_extraction_valid(hf_home):
+            print(f"Valid extraction sentinel found at {hf_home}. Skipping extraction.")
         else:
-            print("Notice: hf_cache.tar.aa chunk was not found in standard directories. Skipping local cache extraction.")
+            try:
+                extract_cache_chunks(chunks_dir, hf_home)
+            except Exception as e:
+                print(f"Warning: Cache extraction failed: {e}. Training will continue using default Hugging Face download.")
+    else:
+        print("Notice: hf_cache.tar.aa chunk was not found in standard directories. Skipping local cache extraction.")
 
     print("\n=== Step 4: Kickstarting Model Training Pipeline ===")
     # Run the multilingual sequential runner for all three languages

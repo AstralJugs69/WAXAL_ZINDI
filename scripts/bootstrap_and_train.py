@@ -264,27 +264,30 @@ def main():
     # 2. Bootstrap environment and compile KenLM
     bootstrap_environment(args.tpu)
     
-    # 3. Extract HuggingFace cache chunks if available
-    hf_home = os.environ.get("HF_HOME")
-    if not hf_home:
-        if os.path.exists("/kaggle/temp"):
-            hf_home = "/kaggle/temp/hf_home"
-        elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
-            hf_home = "/tmp/hf_home"
-        else:
-            hf_home = "./hf_home"
-        
-    chunks_dir = find_cache_chunks_dir()
-    if chunks_dir:
-        if check_extraction_valid(hf_home):
-            print(f"Valid extraction sentinel found at {hf_home}. Skipping extraction.")
-        else:
-            try:
-                extract_cache_chunks(chunks_dir, hf_home)
-            except Exception as e:
-                print(f"Warning: Cache extraction failed: {e}. Training will fallback to online HF hub.")
+    # 3. Extract HuggingFace cache chunks if available (skip if running in Kaggle environment to avoid duplicate extraction)
+    if os.path.exists("/kaggle"):
+        print("Kaggle environment detected. Skipping duplicate cache extraction in bootstrap_and_train.py (handled by bootstrapper).")
     else:
-        print("Notice: hf_cache.tar.aa chunk was not found in standard directories. Skipping local cache extraction.")
+        hf_home = os.environ.get("HF_HOME")
+        if not hf_home:
+            if os.path.exists("/kaggle/temp"):
+                hf_home = "/kaggle/temp/hf_home"
+            elif os.path.exists("/kaggle/working") or os.path.exists("/content"):
+                hf_home = "/tmp/hf_home"
+            else:
+                hf_home = "./hf_home"
+            
+        chunks_dir = find_cache_chunks_dir()
+        if chunks_dir:
+            if check_extraction_valid(hf_home):
+                print(f"Valid extraction sentinel found at {hf_home}. Skipping extraction.")
+            else:
+                try:
+                    extract_cache_chunks(chunks_dir, hf_home)
+                except Exception as e:
+                    print(f"Warning: Cache extraction failed: {e}. Training will fallback to online HF hub.")
+        else:
+            print("Notice: hf_cache.tar.aa chunk was not found in standard directories. Skipping local cache extraction.")
         
     # 4. Kickstart training and watch for remote git changes
     proc = start_training_subprocess(args)
