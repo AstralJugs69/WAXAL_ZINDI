@@ -39,6 +39,7 @@ def _processor_call(proc, **kwargs):
         return proc(
             **kwargs,
             text_kwargs={"max_length": 2048},
+            audio_kwargs={"max_length": 400000, "truncation": False},
         )
     except TypeError:
         return proc(
