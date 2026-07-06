@@ -287,7 +287,12 @@ def main():
     return_dict = manager.dict()
     processes = []
 
+    import sys
     hf_token = os.environ.get("HF_TOKEN")
+    if "--hf_token" in sys.argv:
+        idx = sys.argv.index("--hf_token")
+        if idx + 1 < len(sys.argv):
+            hf_token = sys.argv[idx + 1]
     logger.info("Spawning parallel inference worker processes...")
     for w_id in range(num_workers):
         p = ctx.Process(

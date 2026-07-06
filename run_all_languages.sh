@@ -69,7 +69,7 @@ echo ""
 echo "=========================================================="
 echo "🎯 Generating final submission.csv... 🎯"
 echo "=========================================================="
-python generate_submission.py
+HF_TOKEN="$HF_TOKEN" python generate_submission.py
 
 echo "=========================================================="
 echo "🎉 Sequential training of all three languages complete! 🎉"
