@@ -50,7 +50,11 @@ fi
 
 # 3. Train all three languages sequentially (Lingala, Shona, Luganda)
 for LANG in lin sna lug; do
-    STEPS=800
+    if [ "$LANG" = "lug" ]; then
+        STEPS=800
+    else
+        STEPS=1100
+    fi
     
     echo ""
     echo "=========================================================="
