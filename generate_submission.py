@@ -66,6 +66,25 @@ def _is_no_audio_refusal(text):
     return any(marker in normalized for marker in NO_AUDIO_REFUSAL_MARKERS)
 
 
+def _is_english_hallucination(text):
+    normalized = normalize_text(text)
+    words = set(normalized.split())
+    english_stopwords = {
+        "the", "of", "and", "is", "it", "to", "in", "that", "was", "for", 
+        "on", "are", "as", "with", "his", "they", "i", "at", "be", "this", 
+        "have", "from", "or", "one", "had", "by", "word", "but", "not", 
+        "what", "all", "were", "we", "when", "your", "can", "said", "there", 
+        "use", "an", "each", "which", "she", "do", "how", "their", "if", 
+        "will", "up", "other", "about", "out", "many", "then", "them", 
+        "these", "so", "some", "her", "would", "make", "like", "him", 
+        "into", "has", "look", "two", "more", "write", "go", "see", 
+        "number", "no", "way", "could", "people", "my", "than", "first", 
+        "water", "been", "call", "who", "oil", "its", "now", "find"
+    }
+    matched = words.intersection(english_stopwords)
+    return len(matched) >= 4
+
+
 def _move_inputs_to_device(inputs, device, dtype=None):
     moved = {}
     for key, value in inputs.items():
@@ -585,6 +604,11 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                     if _is_no_audio_refusal(chunk_text):
                         worker_logger.warning(
                             f"[Worker {worker_id}] Dropping Gemma no-audio refusal for {audio_id}: '{chunk_text}'"
+                        )
+                        chunk_text = ""
+                    elif _is_english_hallucination(chunk_text):
+                        worker_logger.warning(
+                            f"[Worker {worker_id}] Dropping Gemma English hallucination for {audio_id}: '{chunk_text}'"
                         )
                         chunk_text = ""
                 else:
