@@ -505,6 +505,20 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                 chunks = [y]
             else:
                 chunks = vad.segment(y, sr=16000)
+                
+            # Limit chunk size to max 20 seconds (320000 samples at 16kHz)
+            # to prevent integer overflow and match model training limits
+            MAX_CHUNK_SAMPLES = 20 * 16000
+            safe_chunks = []
+            for chunk in chunks:
+                if len(chunk) > MAX_CHUNK_SAMPLES:
+                    for start in range(0, len(chunk), MAX_CHUNK_SAMPLES):
+                        sub_chunk = chunk[start:start+MAX_CHUNK_SAMPLES]
+                        if len(sub_chunk) >= 16000 * 0.5: # skip tiny fragments < 0.5s
+                            safe_chunks.append(sub_chunk)
+                else:
+                    safe_chunks.append(chunk)
+            chunks = safe_chunks
             
             # Parse language from ID prefix (e.g. lug_96114 -> lug)
             detected_lang = "lin"
@@ -551,10 +565,12 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
                     with torch.no_grad():
                         outputs = model.generate(
                             **inputs,
-                            max_new_tokens=128,
+                            max_new_tokens=96,
                             pad_token_id=processor.tokenizer.pad_token_id,
                             use_cache=True,
                             do_sample=False,
+                            repetition_penalty=1.15,
+                            no_repeat_ngram_size=4,
                         )
                     input_len = inputs["input_ids"].shape[1]
                     prompt_str = processor.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=False)
