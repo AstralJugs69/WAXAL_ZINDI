@@ -130,6 +130,17 @@ def download_and_extract_cache(hf_home_dir):
         print(f"Valid cache extraction sentinel found at {hf_home_dir}. Skipping download and extraction.")
         return
 
+    # Check if Kaggle credentials are set up
+    home_dir = os.path.expanduser("~")
+    has_credentials = (
+        os.path.exists(os.path.join(home_dir, ".kaggle", "kaggle.json")) or
+        (os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
+    )
+    if not has_credentials:
+        print("Warning: Kaggle credentials not configured. Skipping Step 3 (Download/Extract Cache Chunks).")
+        print("Training will download the dataset directly from Hugging Face Hub (slower startup but fully functional).")
+        return
+
     # 2. Ensure kaggle CLI package is installed
     try:
         import kaggle
