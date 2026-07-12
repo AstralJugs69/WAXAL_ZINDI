@@ -1,0 +1,53 @@
+# Minimal MMS-300M config for Kaggle TPU v5e-8 (8 cores, ~16GB HBM each).
+# Keep this file simple — complex dynamic scaling lives in the old HF Trainer path
+# and is a major source of TPU instability.
+model_id: "facebook/mms-300m"
+model_family: "mms"
+languages:
+  - "lin"
+  - "sna"
+  - "lug"
+
+training:
+  learning_rate: 1.0e-4
+  # Per-core batch. 4 is conservative and keeps static-shape padding safe on 16GB HBM.
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
+  # Effective global batch ≈ 4 * 8 cores * 1 = 32
+  num_train_epochs: 8
+  max_steps: -1
+  # bf16-true is native on TPU; Lightning maps this correctly with accelerator=tpu
+  precision: "bf16-true"
+  gradient_clip_val: 1.0
+  warmup_steps: 200
+  weight_decay: 0.01
+  log_every_n_steps: 25
+  val_check_interval: 0.5
+  save_top_k: 2
+  # Fixed max audio length in seconds — CRITICAL for XLA graph stability.
+  # Variable lengths cause endless recompiles and "never finishes epoch" symptoms.
+  max_audio_seconds: 16.0
+  # Keep 0 workers on TPU — multiprocessing + XLA is a common hang source.
+  num_workers: 0
+
+data:
+  train_csv: "Train.csv"
+  test_csv: "Test.csv"
+  duration_min: 1.5
+  duration_max: 16.0
+  wps_min: 1.0
+  wps_max: 8.0
+  k_folds: 5
+  use_external_corpora: true
+  external_corpora_sources:
+    - common_voice
+    - fleurs
+  # Cap external samples per language so first epoch is not buried in downloads
+  external_max_samples: 50000
+
+decoding:
+  beam_width: 128
+  alpha: 0.5
+  beta: 1.5
+  build_kenlm_after_train: true

@@ -247,16 +247,20 @@ def main():
     else:
         print("Notice: hf_cache.tar.aa chunk was not found in standard directories. Skipping local cache extraction.")
 
-    print("\n=== Step 4: Kickstarting Model Training Pipeline ===")
-    # Run the multilingual sequential runner for all three languages
-    run_command_live([
-        "bash", "run_all_languages.sh",
-        "config/base_gemma.yaml",
-        "0",
-        hf_token or "",
-        os.environ.get("KAGGLE_USERNAME", ""),
-        os.environ.get("KAGGLE_KEY", "")
-    ])
+    print("\n=== Step 4: Kickstarting MMS Lightning TPU/GPU Training Pipeline ===")
+    # Clean path: minimal Lightning MMS trainer (avoids over-engineered HF+XLA spawn path)
+    train_cmd = [
+        sys.executable, "run_tpu_train.py",
+        "--lang", "all",
+        "--fold", "0",
+        "--config", "config/base_mms_tpu.yaml",
+        "--devices", "8",
+    ]
+    if tpu_active:
+        train_cmd.append("--tpu")
+    if hf_token:
+        train_cmd.extend(["--hf_token", hf_token])
+    run_command_live(train_cmd)
 
     print("\n=== Bootstrapping and Training Pipeline Completed Successfully ===")
 

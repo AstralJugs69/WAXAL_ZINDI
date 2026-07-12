@@ -32,6 +32,49 @@ def get_outputs_dir():
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
 
+
+def configure_hf_cache():
+    """
+    Point HF cache at a writable location without hardcoding Lightning paths.
+    Order: existing env → Kaggle temp → local project → Lightning (only if present).
+    """
+    if os.environ.get("HF_HOME"):
+        return os.environ["HF_HOME"]
+
+    candidates = []
+    if os.path.exists("/kaggle/temp"):
+        candidates.append("/kaggle/temp/hf_home")
+    if os.path.exists("/kaggle/working"):
+        candidates.append("/tmp/hf_home")
+    lightning_home = "/teamspace/studios/this_studio/hf_home"
+    if os.path.exists("/teamspace/studios/this_studio"):
+        candidates.append(lightning_home)
+    candidates.append(str(Path(__file__).resolve().parent / "hf_home"))
+
+    hf_home = candidates[0]
+    os.makedirs(hf_home, exist_ok=True)
+    os.environ["HF_HOME"] = hf_home
+    os.environ.setdefault("HF_HUB_CACHE", os.path.join(hf_home, "hub"))
+    os.environ.setdefault("HF_DATASETS_CACHE", os.path.join(hf_home, "datasets"))
+    return hf_home
+
+
+def canonical_example_id(example):
+    """
+    Map a HF example to a Zindi submission ID.
+    Never fall back to speaker_id — that caused silent blank predictions.
+    """
+    if not isinstance(example, dict):
+        return None
+    for key in ("id", "client_id"):
+        value = example.get(key)
+        if value is None:
+            continue
+        audio_id = str(value).strip()
+        if audio_id:
+            return audio_id
+    return None
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("inference")
@@ -357,7 +400,7 @@ def _read_expected_submission_ids(test_csv_path):
     return ids
 
 
-def _write_validated_submission(expected_ids, worker_results, output_path="submission.csv"):
+def _merge_worker_predictions(worker_results):
     combined_predictions = {}
     duplicate_predictions = []
 
@@ -367,17 +410,35 @@ def _write_validated_submission(expected_ids, worker_results, output_path="submi
             continue
         for audio_id, transcription in dict(predictions).items():
             audio_id = str(audio_id).strip()
+            if audio_id in combined_predictions and combined_predictions[audio_id]:
+                # Keep the first non-empty prediction; overwrite only if current is blank.
+                if transcription:
+                    duplicate_predictions.append(audio_id)
+                continue
+            if audio_id in combined_predictions and not combined_predictions[audio_id] and transcription:
+                combined_predictions[audio_id] = str(transcription)
+                continue
             if audio_id in combined_predictions:
                 duplicate_predictions.append(audio_id)
                 continue
             combined_predictions[audio_id] = "" if transcription is None else str(transcription)
 
+    if duplicate_predictions:
+        logger.warning(
+            f"Observed duplicate worker predictions for {len(set(duplicate_predictions))} IDs. "
+            f"First few: {sorted(set(duplicate_predictions))[:10]}"
+        )
+    return combined_predictions
+
+
+def _write_validated_submission(expected_ids, combined_predictions, output_path="submission.csv", max_blank_frac=0.02):
     expected_set = set(expected_ids)
     extra_ids = sorted(set(combined_predictions) - expected_set)
     if extra_ids:
-        logger.warning(f"Ignoring {len(extra_ids)} predictions for IDs not present in expected submission. First few: {extra_ids[:10]}")
-    if duplicate_predictions:
-        logger.warning(f"Observed duplicate worker predictions for {len(set(duplicate_predictions))} IDs. First few: {sorted(set(duplicate_predictions))[:10]}")
+        logger.warning(
+            f"Ignoring {len(extra_ids)} predictions for IDs not present in expected submission. "
+            f"First few: {extra_ids[:10]}"
+        )
 
     rows = [
         {"ID": audio_id, "Target": combined_predictions.get(audio_id, "")}
@@ -396,28 +457,51 @@ def _write_validated_submission(expected_ids, worker_results, output_path="submi
     if missing_ids:
         raise RuntimeError(f"Submission is missing expected IDs: {missing_ids[:10]}")
 
-    blank_count = int((submission_df["Target"].fillna("").astype(str).str.len() == 0).sum())
+    blank_mask = submission_df["Target"].fillna("").astype(str).str.len() == 0
+    blank_count = int(blank_mask.sum())
+    blank_frac = blank_count / max(len(submission_df), 1)
+    blank_ids = submission_df.loc[blank_mask, "ID"].tolist()
     if blank_count:
-        logger.warning(f"Submission contains {blank_count} blank transcriptions, but no IDs are missing.")
+        logger.warning(
+            f"Submission contains {blank_count} blank transcriptions "
+            f"({blank_frac:.1%}). First few: {blank_ids[:10]}"
+        )
+    if blank_frac > max_blank_frac:
+        raise RuntimeError(
+            f"Blank transcription rate {blank_frac:.1%} exceeds limit {max_blank_frac:.1%}. "
+            f"Fix model/audio loading before submitting. Blank IDs sample: {blank_ids[:20]}"
+        )
 
     temp_path = f"{output_path}.tmp"
     submission_df.to_csv(temp_path, index=False)
     os.replace(temp_path, output_path)
-    logger.info(f"Validated submission written to {output_path}: {len(submission_df)} rows, 0 missing IDs.")
+    logger.info(
+        f"Validated submission written to {output_path}: {len(submission_df)} rows, "
+        f"{blank_count} blanks, 0 missing IDs."
+    )
+    return blank_ids
 
 
-def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audio_dict_shard, return_dict, hf_token):
+def worker_inference(
+    worker_id,
+    num_gpus,
+    target_languages,
+    test_ids_shard,
+    audio_dict_shard,
+    return_dict,
+    hf_token,
+    prefer_gemma=False,
+):
     """
     Worker function executed in a separate process.
     Loads models on the assigned GPU and transcribes its shard of test audios.
+    Prefers per-language fine-tuned MMS unless prefer_gemma=True.
     """
     import os
     if hf_token:
         os.environ["HF_TOKEN"] = hf_token
-    # Set default HF home to persist across Restarts and load cache
-    os.environ["HF_HOME"] = "/teamspace/studios/this_studio/hf_home"
-    os.environ["HF_HUB_CACHE"] = "/teamspace/studios/this_studio/hf_home/hub"
-    os.environ["HF_DATASETS_CACHE"] = "/teamspace/studios/this_studio/hf_home/datasets"
+    # Keep any parent HF cache settings; only configure if unset.
+    configure_hf_cache()
 
     import logging
     # Set up child logger
@@ -446,12 +530,40 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
     model_families = {}
     decoders = {}
     
-    # Load models
+    # Load models — MMS fine-tunes first (primary strategy); Gemma only if preferred/available.
     for lang in target_languages:
         custom_gemma_dir = f"{get_outputs_dir()}/{lang}_gemma-3n-E2B-it_fold0/best_model"
         custom_mms_dir = f"{get_outputs_dir()}/{lang}_mms-300m_fold0/best_model"
-        
-        if os.path.exists(custom_gemma_dir):
+        has_mms = os.path.exists(custom_mms_dir)
+        has_gemma = os.path.exists(custom_gemma_dir)
+
+        use_gemma = prefer_gemma and has_gemma
+        use_mms = (not use_gemma) and has_mms
+        if not use_mms and not use_gemma and has_gemma:
+            # Only fall back to Gemma when no MMS checkpoint exists.
+            use_gemma = True
+
+        if use_mms:
+            model = Wav2Vec2ForCTC.from_pretrained(custom_mms_dir).to(device)
+            processor = Wav2Vec2Processor.from_pretrained(custom_mms_dir)
+            try:
+                processor.tokenizer.set_target_lang(lang)
+            except Exception:
+                pass
+            model_families[lang] = "mms"
+            worker_logger.info(f"[Worker {worker_id}] Loaded fine-tuned MMS for {lang} from {custom_mms_dir}")
+
+            lm_path = os.path.join(custom_mms_dir, "lm.bin")
+            if os.path.exists(lm_path):
+                try:
+                    vocab = processor.tokenizer.get_vocab()
+                    decoders[lang] = create_ctc_decoder(vocab_dict=vocab, kenlm_model_path=lm_path)
+                except Exception as exc:
+                    worker_logger.warning(f"[Worker {worker_id}] KenLM load failed for {lang}: {exc}")
+                    decoders[lang] = None
+            else:
+                decoders[lang] = None
+        elif use_gemma:
             model, processor = _load_gemma_model_and_processor(
                 custom_gemma_dir,
                 device_map,
@@ -460,29 +572,19 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
             )
             model_families[lang] = "gemma"
             decoders[lang] = None
-        elif os.path.exists(custom_mms_dir):
-            model = Wav2Vec2ForCTC.from_pretrained(custom_mms_dir).to(device)
-            processor = Wav2Vec2Processor.from_pretrained(custom_mms_dir)
-            processor.tokenizer.set_target_lang(lang)
-            model_families[lang] = "mms"
-            
-            # Check KenLM binary
-            lm_path = os.path.join(custom_mms_dir, "lm.bin")
-            if os.path.exists(lm_path):
-                try:
-                    vocab = processor.tokenizer.get_vocab()
-                    decoders[lang] = create_ctc_decoder(vocab_dict=vocab, kenlm_model_path=lm_path)
-                except Exception:
-                    decoders[lang] = None
-            else:
-                decoders[lang] = None
+            worker_logger.info(f"[Worker {worker_id}] Loaded Gemma for {lang} from {custom_gemma_dir}")
         else:
             # Fallback to pre-trained mms-1b-all for this language
-            model = Wav2Vec2ForCTC.from_pretrained("facebook/mms-1b-all", target_lang=lang, ignore_mismatched_sizes=True).to(device)
+            model = Wav2Vec2ForCTC.from_pretrained(
+                "facebook/mms-1b-all", target_lang=lang, ignore_mismatched_sizes=True
+            ).to(device)
             processor = Wav2Vec2Processor.from_pretrained("facebook/mms-1b-all", target_lang=lang)
             processor.tokenizer.set_target_lang(lang)
             model_families[lang] = "mms"
             decoders[lang] = None
+            worker_logger.warning(
+                f"[Worker {worker_id}] No fine-tuned checkpoint for {lang}; using base mms-1b-all"
+            )
             
         model.eval()
         models[lang] = model
@@ -638,98 +740,192 @@ def worker_inference(worker_id, num_gpus, target_languages, test_ids_shard, audi
     return_dict[worker_id] = predictions
     worker_logger.info(f"[Worker {worker_id}] Finished shard.")
 
-def main():
-    logger.info("Initializing high-performance parallel inference pipeline...")
-    
-    # 1. Resolve paths
-    test_csv_path = "Test.csv"
-    if not os.path.exists(test_csv_path):
-        found = glob.glob("**/Test.csv", recursive=True)
-        if found:
-            test_csv_path = found[0]
-            
-    logger.info(f"Loading test CSV from: {test_csv_path}")
-    test_ids = _read_expected_submission_ids(test_csv_path)
-    
-    # 2. Define target languages
-    target_languages = ["lin", "sna", "lug"]
-    
-    # 3. Load all test audio from HuggingFace dataset (streamed and eagerly cached in RAM to avoid lazy downloads during inference)
+def _load_test_audio_dict(test_ids):
+    """
+    Stream HF test splits and cache audio keyed only by canonical example IDs.
+    """
     import datasets
+
+    expected = set(str(i).strip() for i in test_ids)
     audio_dict = {}
+    missing_after_load = set(expected)
+
     for lang in ["lin", "sna", "lug"]:
         logger.info(f"Streaming and caching test split from HF Hub for {lang}...")
         try:
-            lang_test = datasets.load_dataset("google/WaxalNLP", name=f"{lang}_asr", split="test", streaming=True)
+            lang_test = datasets.load_dataset(
+                "google/WaxalNLP", name=f"{lang}_asr", split="test", streaming=True
+            )
             lang_test = lang_test.cast_column("audio", datasets.Audio(sampling_rate=16000))
             count = 0
             for ex in lang_test:
-                ex_id = ex.get("id") or ex.get("client_id") or ex.get("speaker_id")
-                if ex_id:
-                    # Contiguous array copy to release file descriptors and prevent memory leaks
-                    audio_dict[ex_id] = {
-                        "array": np.asarray(ex["audio"]["array"]).copy(),
-                        "sampling_rate": ex["audio"]["sampling_rate"]
-                    }
-                    count += 1
+                ex_id = canonical_example_id(ex)
+                if not ex_id:
+                    continue
+                ex_id = str(ex_id).strip()
+                if ex_id not in expected and not any(
+                    ex_id.startswith(f"{prefix}_") for prefix in ("lin", "sna", "lug")
+                ):
+                    continue
+                # Contiguous array copy to release file descriptors and prevent memory leaks
+                audio_dict[ex_id] = {
+                    "array": np.asarray(ex["audio"]["array"]).copy(),
+                    "sampling_rate": ex["audio"]["sampling_rate"],
+                }
+                count += 1
+                missing_after_load.discard(ex_id)
             logger.info(f"Successfully cached {count} test examples in RAM for {lang}")
         except Exception as e:
             logger.warning(f"Failed to cache test split for {lang}: {e}")
 
-    # Determine GPU counts and configure parallel processes
+    still_missing = sorted(i for i in expected if i not in audio_dict)
+    if still_missing:
+        logger.warning(
+            f"{len(still_missing)} expected Test IDs have no audio after HF stream. "
+            f"First few: {still_missing[:10]}"
+        )
+    return audio_dict
+
+
+def _run_parallel_inference(test_ids, audio_dict, target_languages, hf_token, prefer_gemma=False):
     num_gpus = torch.cuda.device_count()
     if num_gpus > 0:
-        # Launch 2 parallel processes per GPU to avoid maxing out VRAM
-        num_workers = num_gpus * 2
-        logger.info(f"Detected {num_gpus} GPUs. Launching {num_workers} parallel workers (2 per GPU)...")
+        num_workers = max(1, num_gpus)  # 1 worker/GPU is more stable than 2
+        logger.info(f"Detected {num_gpus} GPUs. Launching {num_workers} parallel workers...")
     else:
-        num_workers = 2
-        logger.info(f"No GPUs detected. Launching {num_workers} CPU-bound workers...")
+        num_workers = 1
+        logger.info("No GPUs detected. Launching 1 CPU worker...")
 
-    # Split test IDs and cache dictionaries into equal shards for parallel workers
     shards = [[] for _ in range(num_workers)]
     for idx, audio_id in enumerate(test_ids):
         shards[idx % num_workers].append(audio_id)
-        
+
     sharded_audio_dicts = [{} for _ in range(num_workers)]
     for w_id in range(num_workers):
         for audio_id in shards[w_id]:
             if audio_id in audio_dict:
                 sharded_audio_dicts[w_id][audio_id] = audio_dict[audio_id]
 
-    # Initialize multiprocessing with spawn context (critical for CUDA compatibility)
     ctx = mp.get_context("spawn")
     manager = ctx.Manager()
     return_dict = manager.dict()
     processes = []
 
-    import sys
-    hf_token = os.environ.get("HF_TOKEN")
-    if "--hf_token" in sys.argv:
-        idx = sys.argv.index("--hf_token")
-        if idx + 1 < len(sys.argv):
-            hf_token = sys.argv[idx + 1]
     logger.info("Spawning parallel inference worker processes...")
     for w_id in range(num_workers):
         p = ctx.Process(
             target=worker_inference,
-            args=(w_id, num_gpus, target_languages, shards[w_id], sharded_audio_dicts[w_id], return_dict, hf_token)
+            args=(
+                w_id,
+                num_gpus,
+                target_languages,
+                shards[w_id],
+                sharded_audio_dicts[w_id],
+                return_dict,
+                hf_token,
+                prefer_gemma,
+            ),
         )
         processes.append(p)
         p.start()
 
-    logger.info("All worker processes spawned. Monitoring progress...")
-    # Monitor completion of subprocesses
     for p in processes:
         p.join()
         if p.exitcode != 0:
-            logger.warning(f"Worker process {p.pid} exited with code {p.exitcode}; its missing IDs will be emitted with blank targets.")
-
-    logger.info("All parallel workers completed. Compiling final predictions...")
+            logger.warning(
+                f"Worker process {p.pid} exited with code {p.exitcode}; "
+                "its IDs may be blank and will be retried if possible."
+            )
 
     worker_results = {w_id: dict(return_dict.get(w_id, {})) for w_id in range(num_workers)}
-    _write_validated_submission(test_ids, worker_results, output_path="submission.csv")
+    return _merge_worker_predictions(worker_results)
+
+
+def _retry_blank_ids(blank_ids, audio_dict, target_languages, hf_token, prefer_gemma=False):
+    """Single-process retry for blank predictions (replaces transcribe_missing.py)."""
+    if not blank_ids:
+        return {}
+    logger.info(f"Retrying {len(blank_ids)} blank IDs in a single-process pass...")
+    ctx = mp.get_context("spawn")
+    manager = ctx.Manager()
+    return_dict = manager.dict()
+    shard_audio = {aid: audio_dict[aid] for aid in blank_ids if aid in audio_dict}
+    missing_audio = [aid for aid in blank_ids if aid not in audio_dict]
+    if missing_audio:
+        logger.warning(f"Retry cannot recover {len(missing_audio)} IDs with no audio: {missing_audio[:10]}")
+
+    p = ctx.Process(
+        target=worker_inference,
+        args=(0, torch.cuda.device_count(), target_languages, blank_ids, shard_audio, return_dict, hf_token, prefer_gemma),
+    )
+    p.start()
+    p.join()
+    if p.exitcode != 0:
+        logger.warning(f"Retry worker exited with code {p.exitcode}")
+    return dict(return_dict.get(0, {}))
+
+
+def main():
+    logger.info("Initializing high-performance parallel inference pipeline...")
+    configure_hf_cache()
+
+    # 1. Resolve paths
+    test_csv_path = "Test.csv"
+    if not os.path.exists(test_csv_path):
+        found = glob.glob("**/Test.csv", recursive=True)
+        if found:
+            test_csv_path = found[0]
+
+    logger.info(f"Loading test CSV from: {test_csv_path}")
+    test_ids = _read_expected_submission_ids(test_csv_path)
+
+    # 2. Define target languages
+    target_languages = ["lin", "sna", "lug"]
+
+    import sys
+    hf_token = os.environ.get("HF_TOKEN")
+    prefer_gemma = "--prefer-gemma" in sys.argv
+    max_blank_frac = 0.02
+    if "--hf_token" in sys.argv:
+        idx = sys.argv.index("--hf_token")
+        if idx + 1 < len(sys.argv):
+            hf_token = sys.argv[idx + 1]
+    if "--max-blank-frac" in sys.argv:
+        idx = sys.argv.index("--max-blank-frac")
+        if idx + 1 < len(sys.argv):
+            max_blank_frac = float(sys.argv[idx + 1])
+
+    # 3. Load audio once (shared by main pass + blank retry)
+    audio_dict = _load_test_audio_dict(test_ids)
+    logger.info(
+        f"Audio cache ready: {len(audio_dict)} / {len(test_ids)} expected IDs "
+        f"({len(audio_dict)/max(len(test_ids),1):.1%} coverage)"
+    )
+
+    # 4. Main parallel pass
+    combined = _run_parallel_inference(
+        test_ids, audio_dict, target_languages, hf_token, prefer_gemma=prefer_gemma
+    )
+
+    # 5. Retry blanks (eliminates need for transcribe_missing.py)
+    blank_ids = [aid for aid in test_ids if not str(combined.get(aid, "")).strip()]
+    if blank_ids:
+        retry_preds = _retry_blank_ids(
+            blank_ids, audio_dict, target_languages, hf_token, prefer_gemma=prefer_gemma
+        )
+        for aid, text in retry_preds.items():
+            if text and str(text).strip():
+                combined[aid] = str(text)
+
+    # 6. Validate and write (fails hard if blank rate is still too high)
+    _write_validated_submission(
+        test_ids,
+        combined,
+        output_path="submission.csv",
+        max_blank_frac=max_blank_frac,
+    )
     logger.info("Successfully generated submission.csv in the correct format!")
+
 
 if __name__ == "__main__":
     main()

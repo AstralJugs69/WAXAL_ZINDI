@@ -35,50 +35,43 @@ export WAXAL_OUTPUTS_DIR="${WAXAL_OUTPUTS_DIR:-$(pwd)/outputs}"
 echo "Using checkpoint/output directory: $WAXAL_OUTPUTS_DIR"
 
 # 2. Extract arguments or use defaults
-CONFIG=${1:-"config/base_gemma.yaml"}
+CONFIG=${1:-"config/base_mms_tpu.yaml"}
 FOLD=${2:-0}
 HF_TOKEN=${3:-$HF_TOKEN}
-KAGGLE_USER=${4:-$KAGGLE_USERNAME}
-KAGGLE_KEY=${5:-$KAGGLE_KEY}
 
 # TPU auto-detection
 TPU_FLAG=""
-if [ -n "$TPU_NAME" ] || [ -d "/usr/share/tpu-support" ] || [ -f "/usr/lib/libtpu.so" ]; then
+if [ -n "$TPU_NAME" ] || [ -d "/usr/share/tpu-support" ] || [ -f "/usr/lib/libtpu.so" ] || [ -e "/dev/accel0" ]; then
     echo "TPU environment detected. Enabling --tpu flag."
     TPU_FLAG="--tpu"
 fi
 
-# 3. Train all three languages sequentially (Lingala, Shona, Luganda)
-for LANG in lin sna lug; do
-    if [ "$LANG" = "lug" ]; then
-        STEPS=800
-    else
-        STEPS=1100
-    fi
-    
-    echo ""
-    echo "=========================================================="
-    echo "🚀 Starting Training for Language: $LANG ($STEPS steps, Fold $FOLD) 🚀"
-    echo "=========================================================="
-    
-    python run_lightning.py \
-      --config "$CONFIG" \
-      --fold "$FOLD" \
-      --target_lang "$LANG" \
-      --max_steps "$STEPS" \
-      --git_poll_interval 5 \
-      --hf_token "$HF_TOKEN" \
-      --kaggle_username "$KAGGLE_USER" \
-      --kaggle_key "$KAGGLE_KEY" \
-      $TPU_FLAG
-done
+# 3. Train all three languages with the minimal Lightning MMS path
+#    (replaces fragile HF Trainer + xmp.spawn + git hot-reload path)
+echo ""
+echo "=========================================================="
+echo "🚀 Training lin/sna/lug via run_tpu_train.py (Lightning) 🚀"
+echo "=========================================================="
+
+EXTRA=()
+if [ -n "$HF_TOKEN" ]; then
+  EXTRA+=(--hf_token "$HF_TOKEN")
+fi
+
+python run_tpu_train.py \
+  --lang all \
+  --fold "$FOLD" \
+  --config "$CONFIG" \
+  --devices 8 \
+  $TPU_FLAG \
+  "${EXTRA[@]}"
 
 # 4. Generate the final submission file using all trained checkpoints
 echo ""
 echo "=========================================================="
 echo "🎯 Generating final submission.csv... 🎯"
 echo "=========================================================="
-HF_TOKEN="$HF_TOKEN" python generate_submission.py
+HF_TOKEN="$HF_TOKEN" python generate_submission.py --max-blank-frac 0.05
 
 echo "=========================================================="
 echo "🎉 Sequential training of all three languages complete! 🎉"

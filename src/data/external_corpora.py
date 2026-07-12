@@ -101,22 +101,44 @@ def load_external_corpus(lang: str, sources: list = None) -> object:
 
         try:
             logger.info(f"Loading external corpus: {dataset_id} [{config_name}] for '{lang}'...")
-            ds = load_dataset(dataset_id, config_name, trust_remote_code=True, token=os.environ.get("HF_TOKEN"))
-
-            # Collect all requested splits
+            token = os.environ.get("HF_TOKEN")
+            # Prefer split-by-split loads so a missing split does not fail the whole source.
             split_parts = []
             for split in cfg.get("splits", ["train"]):
-                if split in ds:
-                    split_parts.append(ds[split])
-                else:
-                    logger.warning(f"  Split '{split}' not found in {dataset_id}. Skipping.")
+                try:
+                    part = load_dataset(
+                        dataset_id,
+                        config_name,
+                        split=split,
+                        trust_remote_code=True,
+                        token=token,
+                    )
+                    split_parts.append(part)
+                    logger.info(f"  Loaded split '{split}': {len(part)} examples")
+                except Exception as split_exc:
+                    logger.warning(f"  Split '{split}' failed for {dataset_id}: {split_exc}")
+
+            if not split_parts:
+                # Fallback: load whole dataset dict
+                try:
+                    ds = load_dataset(
+                        dataset_id,
+                        config_name,
+                        trust_remote_code=True,
+                        token=token,
+                    )
+                    for split in cfg.get("splits", ["train"]):
+                        if split in ds:
+                            split_parts.append(ds[split])
+                except Exception as whole_exc:
+                    logger.warning(f"  Full load failed for {dataset_id}: {whole_exc}")
 
             if not split_parts:
                 logger.warning(f"  No valid splits found in {dataset_id}. Skipping.")
                 continue
 
             from datasets import concatenate_datasets as _cat
-            combined = _cat(split_parts)
+            combined = _cat(split_parts) if len(split_parts) > 1 else split_parts[0]
             logger.info(f"  Raw examples: {len(combined)}")
 
             # ----------------------------------------------------------------
