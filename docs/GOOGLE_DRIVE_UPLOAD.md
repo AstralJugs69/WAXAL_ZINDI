@@ -201,5 +201,5 @@ git pull origin main
 python scripts/upload_checkpoints_gdrive.py --langs lin,sna,lug --keep-archives
 
 # 3) Check
-# https://drive.google.com/drive/folders/1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB
+# https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
 ```
