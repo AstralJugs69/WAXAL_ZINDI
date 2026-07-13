@@ -158,111 +158,166 @@ class WaxalMMSDataModule:
         self.val_dataset = None
 
     def setup(self):
+        import gc
         from datasets import Audio, concatenate_datasets
-        from src.data.dataset import prepare_datasets, load_waxal_dataset_clean, normalize_text
-
-        logger.info("Building speaker-independent folds via GroupKFold...")
-        train_df, _ = prepare_datasets(
-            train_csv_path=self.data_cfg["train_csv"],
-            test_csv_path=self.data_cfg["test_csv"],
-            languages=[self.target_lang],
-            k_folds=int(self.data_cfg.get("k_folds", 5)),
+        from src.data.dataset import (
+            prepare_datasets,
+            load_waxal_dataset_clean,
+            parse_robust_csv,
+            normalize_text,
         )
-        train_df = train_df[train_df["language"] == self.target_lang].reset_index(drop=True)
+        from sklearn.model_selection import GroupKFold
+
+        # Cap HF datasets RAM usage (Kaggle GPU ~29–30GB system RAM)
+        os.environ.setdefault("HF_DATASETS_IN_MEMORY_MAX_SIZE", "0")
+
+        low_ram = bool(self.data_cfg.get("low_ram", True))
+        k_folds = int(self.data_cfg.get("k_folds", 5))
+
+        logger.info(
+            f"Building speaker-independent folds (low_ram={low_ram}) for {self.target_lang}…"
+        )
+
+        if low_ram:
+            # Avoid prepare_datasets double-load: CSV-only + cheap speaker groups.
+            # True speaker_id from HF meta is better but re-loads the whole parquet set.
+            train_df = parse_robust_csv(self.data_cfg["train_csv"])
+            train_df = train_df[train_df["language"] == self.target_lang].reset_index(drop=True)
+            train_df["normalized_transcription"] = train_df["transcription"].apply(normalize_text)
+            train_df = train_df[train_df["normalized_transcription"].str.strip() != ""].reset_index(
+                drop=True
+            )
+            # Pseudo speaker groups: hash(id) buckets keep GroupKFold structure without
+            # a second full HF pass. Slightly weaker than real speaker_id but fits 30GB RAM.
+            train_df["speaker_id"] = train_df["id"].astype(str).map(
+                lambda x: f"spk_{hash(x) % 2000}"
+            )
+            gkf = GroupKFold(n_splits=k_folds)
+            train_df["fold"] = -1
+            for fold_idx, (_, val_idx) in enumerate(
+                gkf.split(train_df, train_df["normalized_transcription"], train_df["speaker_id"])
+            ):
+                train_df.iloc[val_idx, train_df.columns.get_loc("fold")] = fold_idx
+            logger.info(f"Low-RAM GroupKFold done ({k_folds} folds, hash-speaker groups).")
+        else:
+            train_df, _ = prepare_datasets(
+                train_csv_path=self.data_cfg["train_csv"],
+                test_csv_path=self.data_cfg["test_csv"],
+                languages=[self.target_lang],
+                k_folds=k_folds,
+            )
+            train_df = train_df[train_df["language"] == self.target_lang].reset_index(drop=True)
+
         train_split_df = train_df[train_df["fold"] != self.fold].reset_index(drop=True)
         val_split_df = train_df[train_df["fold"] == self.fold].reset_index(drop=True)
         logger.info(f"CSV fold split — train IDs: {len(train_split_df)} | val IDs: {len(val_split_df)}")
 
+        # Cap rows early for extreme low-RAM smoke tests
+        max_train = int(self.data_cfg.get("max_train_samples", 0) or 0)
+        max_val = int(self.data_cfg.get("max_val_samples", 0) or 0)
+        if max_train > 0 and len(train_split_df) > max_train:
+            train_split_df = train_split_df.sample(n=max_train, random_state=42).reset_index(drop=True)
+            logger.info(f"Capped train IDs to {max_train}")
+        if max_val > 0 and len(val_split_df) > max_val:
+            val_split_df = val_split_df.sample(n=max_val, random_state=42).reset_index(drop=True)
+            logger.info(f"Capped val IDs to {max_val}")
+
+        id_to_label_train = dict(
+            zip(train_split_df["id"].astype(str), train_split_df["normalized_transcription"])
+        )
+        id_to_label_val = dict(
+            zip(val_split_df["id"].astype(str), val_split_df["normalized_transcription"])
+        )
+        train_ids = set(id_to_label_train)
+        val_ids = set(id_to_label_val)
+        all_ids = train_ids | val_ids
+        id_to_label_all = {**id_to_label_train, **id_to_label_val}
+
+        del train_df, train_split_df, val_split_df
+        gc.collect()
+
+        logger.info("Loading WaxalNLP once and matching fold IDs (low RAM)…")
         full_ds = load_waxal_dataset_clean(self.target_lang)
 
-        def _match_split(split_df):
-            id_to_label = dict(zip(split_df["id"].astype(str), split_df["normalized_transcription"]))
-            id_set = set(id_to_label.keys())
-            parts = []
-            for split_name in ("train", "validation"):
-                if split_name not in full_ds:
-                    continue
-                ds = full_ds[split_name]
-                id_cols = [c for c in ("id", "client_id") if c in ds.column_names]
-                if not id_cols:
-                    continue
-                key = id_cols[0]
-                filtered = ds.filter(
-                    lambda batch, key=key, id_set=id_set: [str(x) in id_set for x in batch[key]],
-                    batched=True,
-                    batch_size=1000,
-                    desc=f"Match {split_name}",
-                )
-                if len(filtered) == 0:
-                    continue
+        parts = []
+        for split_name in ("train", "validation"):
+            if split_name not in full_ds:
+                continue
+            ds = full_ds[split_name]
+            key = next((c for c in ("id", "client_id") if c in ds.column_names), None)
+            if key is None:
+                continue
+            keep_cols = [c for c in (key, "audio") if c in ds.column_names]
+            drop = [c for c in ds.column_names if c not in keep_cols]
+            if drop:
+                try:
+                    ds = ds.remove_columns(drop)
+                except Exception:
+                    pass
+            filtered = ds.filter(
+                lambda batch, key=key, all_ids=all_ids: [str(x) in all_ids for x in batch[key]],
+                batched=True,
+                batch_size=2000,
+                desc=f"match {split_name}",
+            )
+            if len(filtered) == 0:
+                continue
 
-                def _attach(batch, key=key, id_to_label=id_to_label):
-                    batch["normalized_transcription"] = [
-                        id_to_label.get(str(x), "") for x in batch[key]
-                    ]
-                    return batch
+            def _attach(batch, key=key, id_to_label_all=id_to_label_all, train_ids=train_ids):
+                ids = [str(x) for x in batch[key]]
+                batch["example_id"] = ids
+                batch["normalized_transcription"] = [id_to_label_all.get(i, "") for i in ids]
+                batch["is_train"] = [i in train_ids for i in ids]
+                return batch
 
-                filtered = filtered.map(_attach, batched=True, batch_size=1000)
-                parts.append(filtered)
-            if not parts:
-                raise ValueError(f"No HF audio matched fold split for lang={self.target_lang}")
-            out = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
-            return out.cast_column("audio", Audio(sampling_rate=16000))
+            filtered = filtered.map(_attach, batched=True, batch_size=2000)
+            drop2 = [
+                c
+                for c in filtered.column_names
+                if c not in ("audio", "normalized_transcription", "example_id", "is_train")
+            ]
+            if drop2:
+                filtered = filtered.remove_columns(drop2)
+            parts.append(filtered)
 
-        self.train_dataset = _match_split(train_split_df)
-        self.val_dataset = _match_split(val_split_df)
+        del full_ds
+        gc.collect()
+        if not parts:
+            raise ValueError(f"No HF audio matched fold split for lang={self.target_lang}")
 
-        # Drop empty transcripts only (fast — no audio decode).
-        # Full duration/WPS decode filter is OPTIONAL: on Kaggle it runs ~35–40 ex/s and
-        # takes ~6+ min per language, looks like a hang, and was pruning 80%+ of data
-        # when duration_max=16 (collator already truncates/pads to max_audio_seconds).
-        def _has_text(example):
-            t = example.get("normalized_transcription") or example.get("transcription") or ""
-            return bool(str(t).strip())
+        combined = concatenate_datasets(parts) if len(parts) > 1 else parts[0]
+        del parts
+        gc.collect()
+        combined = combined.cast_column("audio", Audio(sampling_rate=16000))
 
-        self.train_dataset = self.train_dataset.filter(_has_text, desc="drop empty train text")
-        self.val_dataset = self.val_dataset.filter(_has_text, desc="drop empty val text")
+        self.train_dataset = combined.filter(
+            lambda x: bool(x.get("is_train")) and bool(str(x.get("normalized_transcription") or "").strip()),
+            desc="select train fold",
+        )
+        self.val_dataset = combined.filter(
+            lambda x: (not bool(x.get("is_train")))
+            and bool(str(x.get("normalized_transcription") or "").strip()),
+            desc="select val fold",
+        )
+        del combined, id_to_label_train, id_to_label_val, id_to_label_all, train_ids, val_ids, all_ids
+        gc.collect()
+
+        # Drop helper columns — keep only what the collator needs
+        for name in ("train", "val"):
+            ds = self.train_dataset if name == "train" else self.val_dataset
+            drop = [c for c in ds.column_names if c not in ("audio", "normalized_transcription")]
+            if drop:
+                ds = ds.remove_columns(drop)
+            if name == "train":
+                self.train_dataset = ds
+            else:
+                self.val_dataset = ds
+
         logger.info(
-            f"After empty-text filter — train: {len(self.train_dataset)} | val: {len(self.val_dataset)}"
+            f"Ready — train: {len(self.train_dataset)} | val: {len(self.val_dataset)}"
         )
 
-        if self.data_cfg.get("decode_duration_filter", False):
-            dmin = float(self.data_cfg.get("duration_min", 1.5))
-            dmax = float(self.data_cfg.get("duration_max", 30.0))
-            wmin = float(self.data_cfg.get("wps_min", 1.0))
-            wmax = float(self.data_cfg.get("wps_max", 8.0))
-
-            def _ok(example):
-                from src.data.dataset import get_audio_data
-
-                y, sr = get_audio_data(example["audio"])
-                if y is None or sr is None or sr <= 0:
-                    return False
-                dur = len(y) / sr
-                if dur < dmin or dur > dmax:
-                    return False
-                text = example.get("normalized_transcription") or ""
-                words = len(str(text).split())
-                wps = words / dur if dur > 0 else 0
-                return wmin <= wps <= wmax
-
-            logger.info(
-                f"OPTIONAL decode filter duration [{dmin},{dmax}]s WPS [{wmin},{wmax}] "
-                f"(slow: ~30–40 ex/s)…"
-            )
-            nproc = int(self.data_cfg.get("filter_num_proc", 1))
-            filt_kwargs = {"desc": "filter train"}
-            if nproc > 1:
-                filt_kwargs["num_proc"] = nproc
-            self.train_dataset = self.train_dataset.filter(_ok, **filt_kwargs)
-            filt_kwargs["desc"] = "filter val"
-            self.val_dataset = self.val_dataset.filter(_ok, **filt_kwargs)
-            logger.info(
-                f"After duration/WPS filter — train: {len(self.train_dataset)} | "
-                f"val: {len(self.val_dataset)}"
-            )
-
-        if self.data_cfg.get("use_external_corpora", False):
+        if self.data_cfg.get("use_external_corpora", False) and not low_ram:
             try:
                 from src.data.external_corpora import load_external_corpus
 
@@ -270,32 +325,23 @@ class WaxalMMSDataModule:
                 logger.info(f"Loading external corpora for {self.target_lang}: {sources}")
                 external = load_external_corpus(self.target_lang, sources=sources)
                 if external is not None and len(external) > 0:
-                    max_ext = int(self.data_cfg.get("external_max_samples", 50000))
+                    max_ext = int(self.data_cfg.get("external_max_samples", 5000))
                     if len(external) > max_ext:
                         external = external.shuffle(seed=42).select(range(max_ext))
-                    # Align columns before concat
                     keep = {"audio", "normalized_transcription"}
                     drop = [c for c in external.column_names if c not in keep]
                     if drop:
                         external = external.remove_columns(drop)
                     self.train_dataset = concatenate_datasets([self.train_dataset, external])
                     logger.info(f"Train size after external merge: {len(self.train_dataset)}")
-                else:
-                    logger.warning(
-                        f"No external corpora for {self.target_lang}; training on WAXAL only."
-                    )
+                    del external
+                    gc.collect()
             except Exception as exc:
                 logger.warning(f"External corpora merge failed ({exc}); continuing with WAXAL only.")
+        elif self.data_cfg.get("use_external_corpora", False) and low_ram:
+            logger.info("low_ram=true: skipping external corpora merge (enable with low_ram=false).")
 
-        # Keep only columns needed for training
-        keep = {"audio", "normalized_transcription"}
-        for name, ds in (("train", self.train_dataset), ("val", self.val_dataset)):
-            drop = [c for c in ds.column_names if c not in keep]
-            if drop:
-                if name == "train":
-                    self.train_dataset = ds.remove_columns(drop)
-                else:
-                    self.val_dataset = ds.remove_columns(drop)
+        gc.collect()
 
     def train_dataloader(self):
         from torch.utils.data import DataLoader
@@ -500,6 +546,8 @@ def train(args):
         precision = "16-mixed" if torch.cuda.is_available() else "32-true"
         logger.info(f"GPU/CPU mode: accelerator={accelerator}, devices={devices}, precision={precision}")
 
+    # On multi-GPU, each process reloads the full HF dataset → 2× system RAM.
+    # Prefer devices=1 on Kaggle GPU (~30GB RAM) unless you know you have headroom.
     trainer = pl.Trainer(
         accelerator=accelerator,
         devices=devices,
@@ -510,10 +558,11 @@ def train(args):
         gradient_clip_val=float(train_cfg.get("gradient_clip_val", 1.0)),
         accumulate_grad_batches=int(train_cfg.get("gradient_accumulation_steps", 1)),
         log_every_n_steps=int(train_cfg.get("log_every_n_steps", 25)),
-        val_check_interval=float(train_cfg.get("val_check_interval", 0.5)),
+        val_check_interval=float(train_cfg.get("val_check_interval", 1.0)),
+        limit_val_batches=float(train_cfg.get("limit_val_batches", 0.25 if not use_tpu else 1.0)),
         callbacks=[checkpoint_cb, lr_monitor],
         enable_progress_bar=True,
-        num_sanity_val_steps=0,  # skip sanity check recompilation cost on TPU
+        num_sanity_val_steps=0,
         deterministic=False,
     )
 

@@ -9,11 +9,11 @@ languages:
 
 training:
   learning_rate: 1.0e-4
-  # Safer per-GPU batch for 16s audio on 16GB T4; raise to 4 if no OOM.
-  per_device_train_batch_size: 2
-  per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 2
-  # Effective global batch ≈ 2 * 2 GPUs * 2 accum = 8
+  # Kaggle GPU system RAM ~30GB: batch 1 + accum keeps VRAM/RAM safe on T4.
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  # Effective batch ≈ 1 * 1 GPU * 8 = 8 (use devices=1 to avoid 2x RAM DDP copies)
   num_train_epochs: 8
   max_steps: -1
   precision: "16-mixed"
@@ -21,11 +21,11 @@ training:
   warmup_steps: 200
   weight_decay: 0.01
   log_every_n_steps: 25
-  val_check_interval: 0.5
-  save_top_k: 2
-  max_audio_seconds: 16.0
-  # GPUs tolerate a couple of workers; keep modest to avoid RAM blowups.
-  num_workers: 2
+  val_check_interval: 1.0
+  save_top_k: 1
+  max_audio_seconds: 12.0
+  # Must stay 0 on 30GB RAM — workers fork and double dataset footprint.
+  num_workers: 0
 
 data:
   train_csv: "Train.csv"
@@ -35,14 +35,14 @@ data:
   wps_min: 1.0
   wps_max: 8.0
   k_folds: 5
-  # Skip slow per-example audio decode filter (was ~6 min/lang and looked hung).
-  # Collator still truncates/pads to max_audio_seconds.
+  # Critical for Kaggle 30GB system RAM
+  low_ram: true
   decode_duration_filter: false
-  use_external_corpora: true
+  # External corpora deferred (prefetch+merge OOMs 30GB). Train WAXAL-only first.
+  use_external_corpora: false
   external_corpora_sources:
-    - common_voice
     - fleurs
-  external_max_samples: 50000
+  external_max_samples: 3000
 
 decoding:
   beam_width: 128

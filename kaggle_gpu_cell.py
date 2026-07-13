@@ -39,13 +39,15 @@ import time
 # ---------------------------------------------------------------------------
 REPO_URL = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
 FOLD = 0
-DEVICES = 2  # Kaggle 2× T4
-# Slightly higher steps than TPU defaults to offset smaller global batch (~8 vs ~32)
-LANG_STEPS = {"lin": 6000, "sna": 6000, "lug": 4000}
+# devices=1 avoids Lightning DDP forking 2 processes that each load the full
+# dataset (~2× system RAM). Kaggle GPU RAM is ~30GB — dual-process OOMs before train.
+DEVICES = 1
+LANG_STEPS = {"lin": 4000, "sna": 4000, "lug": 2500}
 CONFIG = "config/base_mms_gpu.yaml"
 RUN_SUBMISSION = True
-# If True, skip languages whose best_model already exists (resume-friendly)
 SKIP_EXISTING = True
+# Do NOT prefetch CV/FLEURS up-front on 30GB RAM — loads multi-GB tables.
+SKIP_PREFETCH = True
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -217,13 +219,16 @@ run(
 )
 
 # ---------------------------------------------------------------------------
-# 4) Prefetch external corpora
+# 4) Prefetch external corpora (optional — OOMs 30GB RAM if enabled)
 # ---------------------------------------------------------------------------
-log("Prefetching external corpora for lin/sna/lug…")
-run([sys.executable, "scripts/prefetch_external_data.py", "--langs", "lin,sna,lug"], check=False)
+if not SKIP_PREFETCH:
+    log("Prefetching external corpora…")
+    run([sys.executable, "scripts/prefetch_external_data.py", "--langs", "lin,sna,lug"], check=False)
+else:
+    log("SKIP_PREFETCH=True — training WAXAL-only (fits ~30GB system RAM).")
 
 # ---------------------------------------------------------------------------
-# 5) Train all three languages on 2× T4 (NO --tpu)
+# 5) Train languages on GPU (NO --tpu). Default 1 process to save RAM.
 # ---------------------------------------------------------------------------
 env = {
     "HF_HOME": os.environ["HF_HOME"],
@@ -232,7 +237,9 @@ env = {
     "WAXAL_OUTPUTS_DIR": OUT,
     "PYTHONPATH": REPO,
     "TOKENIZERS_PARALLELISM": "false",
-    "CUDA_VISIBLE_DEVICES": "0,1",
+    "HF_DATASETS_IN_MEMORY_MAX_SIZE": "0",
+    # Single visible GPU when DEVICES=1; both when using 2 (not recommended for RAM)
+    "CUDA_VISIBLE_DEVICES": "0" if DEVICES <= 1 else "0,1",
 }
 if hf_token:
     env["HF_TOKEN"] = hf_token

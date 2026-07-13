@@ -310,9 +310,10 @@ def load_waxal_dataset_clean(lang):
 
 def get_speaker_metadata(languages=["lin", "sna", "lug"]):
     """
-    Loads google/WaxalNLP metadata from Hugging Face for specified configs
-    to map ID to speaker_id.
-    Does NOT load the audio column to prevent downloading/reading any audio bytes into RAM.
+    Loads google/WaxalNLP metadata (id → speaker_id) without decoding audio.
+
+    Low-RAM path: select only id/speaker columns and convert to pandas once per
+    split instead of Python-iterating every row (which OOMs on ~30GB Kaggle GPU).
     """
     logger.info(f"Fetching speaker metadata from Hugging Face google/WaxalNLP for {languages}")
     id_to_meta = {}
@@ -324,15 +325,52 @@ def get_speaker_metadata(languages=["lin", "sna", "lug"]):
             for split_name in ["train", "validation"]:
                 if split_name not in ds:
                     continue
-                # Drop the audio column immediately to prevent loading raw bytes into RAM
-                split_ds = ds[split_name].remove_columns(["audio"])
-                for example in split_ds:
-                    ex_id = example.get("id") or example.get("client_id")
-                    if ex_id:
-                        id_to_meta[ex_id] = {
-                            "speaker_id": example.get("speaker_id") or example.get("client_id") or "unknown_speaker"
-                        }
+                split_ds = ds[split_name]
+                id_col = next((c for c in ("id", "client_id") if c in split_ds.column_names), None)
+                if id_col is None:
+                    continue
+                keep = [id_col]
+                if "speaker_id" in split_ds.column_names:
+                    keep.append("speaker_id")
+                elif "client_id" in split_ds.column_names and "client_id" not in keep:
+                    keep.append("client_id")
+                # Drop everything else (especially audio) before materializing
+                try:
+                    meta = split_ds.select_columns(keep)
+                except Exception:
+                    drop = [c for c in split_ds.column_names if c not in keep]
+                    meta = split_ds.remove_columns(drop) if drop else split_ds
+                try:
+                    pdf = meta.to_pandas()
+                except Exception as e:
+                    logger.warning(f"to_pandas meta failed for {lang}/{split_name}: {e}; falling back to row iter")
+                    pdf = None
+                    for example in meta:
+                        ex_id = example.get(id_col)
+                        if not ex_id:
+                            continue
+                        spk = example.get("speaker_id") or example.get("client_id") or "unknown_speaker"
+                        id_to_meta[str(ex_id)] = {"speaker_id": str(spk)}
                         lang_count += 1
+                if pdf is not None:
+                    spk_col = "speaker_id" if "speaker_id" in pdf.columns else (
+                        "client_id" if "client_id" in pdf.columns else None
+                    )
+                    for _, row in pdf.iterrows():
+                        ex_id = row.get(id_col)
+                        if ex_id is None or (isinstance(ex_id, float) and str(ex_id) == "nan"):
+                            continue
+                        if spk_col:
+                            spk = row.get(spk_col) or "unknown_speaker"
+                        else:
+                            spk = "unknown_speaker"
+                        id_to_meta[str(ex_id)] = {"speaker_id": str(spk)}
+                        lang_count += 1
+                    del pdf
+                del meta
+            del ds
+            import gc
+            gc.collect()
         except Exception as e:
             logger.warning(f"Could not load clean dataset for language {lang} metadata mapping: {e}")
 
