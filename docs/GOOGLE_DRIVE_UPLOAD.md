@@ -5,16 +5,9 @@ https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
 
 **Folder ID:** `1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru`
 
-**What gets uploaded:**  
-For each language that has a folder like:
+**Script:** `scripts/upload_checkpoints_gdrive.py`
 
-```text
-outputs/lin_mms-300m_fold0/
-outputs/sna_mms-300m_fold0/
-outputs/lug_mms-300m_fold0/
-```
-
-the script packs it into one archive:
+**What gets uploaded:** one resumable `.tar.gz` per language folder under `outputs/`:
 
 ```text
 lin_mms-300m_fold0.tar.gz
@@ -22,138 +15,141 @@ sna_mms-300m_fold0.tar.gz
 lug_mms-300m_fold0.tar.gz
 ```
 
-and uploads those with **resumable** multi-MB chunks (safe on flaky networks).
+---
 
-**Script:** `scripts/upload_checkpoints_gdrive.py`  
-**Shortcut:** `python lightning_studio_bootstrap.py upload`
+## Critical: Service accounts cannot fill personal My Drive
+
+If you see:
+
+```text
+Service Accounts do not have storage quota
+storageQuotaExceeded
+```
+
+that is **expected** when:
+
+- The folder lives in **your personal Google Drive (My Drive)**, and  
+- You authenticate with a **service account** JSON.
+
+Sharing the folder with the SA email does **not** fix this. SA has **0 bytes** quota on My Drive.
+
+| Method | Works on personal Drive folder? |
+|--------|----------------------------------|
+| **OAuth as your Google user** | **Yes** (uses *your* quota) — **recommended** |
+| **rclone** logged in as you | **Yes** |
+| Service account + My Drive folder | **No** |
+| Service account + **Shared Drive** (Workspace) | Yes, if SA is a member |
 
 ---
 
-## Recommended path on Lightning AI: Service account
+## Recommended: OAuth user token (personal Drive)
 
-OAuth browser login is awkward on remote studios. A **service account** is the reliable way.
+### Part 1 — Once on a laptop (browser required)
 
-### Step 1 — Create a service account (once, on your laptop)
+1. [Google Cloud Console](https://console.cloud.google.com/) → project  
+2. Enable **Google Drive API**  
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID**  
+   - Application type: **Desktop app**  
+   - Download JSON → rename to `client_secret.json`  
+4. If asked, configure OAuth consent screen (External is fine for personal use; add your email as test user).  
+5. On the laptop, with this repo:
 
-1. Open [Google Cloud Console](https://console.cloud.google.com/).
-2. Create or select a project.
-3. **APIs & Services → Library → enable “Google Drive API”.**
-4. **IAM & Admin → Service Accounts → Create service account**  
-   - Name e.g. `waxal-drive-uploader`
-5. Open the SA → **Keys → Add key → Create new key → JSON**  
-   - Download the JSON file (e.g. `waxal-sa.json`).
-6. Note the SA email, looks like:  
-   `waxal-drive-uploader@YOUR_PROJECT.iam.gserviceaccount.com`
+```bash
+cd /path/to/WAXAL_ZINDI
+# put client_secret.json in the repo root or set:
+export GDRIVE_CLIENT_SECRET=/path/to/client_secret.json
+export GDRIVE_TOKEN=/path/to/token_drive.json
 
-### Step 2 — Share the Drive folder with the service account
-
-1. Open: https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru  
-2. **Share** → add the **service account email**  
-3. Role: **Editor**  
-4. Uncheck “Notify people” if you want → Share  
-
-If you skip this step, upload will fail with 403 / not found.
-
-### Step 3 — Put the JSON key on the Lightning studio
-
-Upload `waxal-sa.json` into the studio, e.g.:
-
-```text
-/teamspace/studios/this_studio/waxal-sa.json
+python scripts/upload_checkpoints_gdrive.py --auth-only
 ```
 
-### Step 4 — Run the upload
+6. Browser opens → log in as **the Google account that owns the Drive folder** → Allow.  
+7. File created: **`token_drive.json`**
+
+### Part 2 — On Lightning studio
+
+1. Upload **`token_drive.json`** to:
+
+```text
+/teamspace/studios/this_studio/token_drive.json
+```
+
+2. **Do not** force the service account. Unset SA if you set it before:
+
+```bash
+unset GOOGLE_APPLICATION_CREDENTIALS
+```
+
+3. Upload (reuses packs if already created):
 
 ```bash
 cd /teamspace/studios/this_studio/WAXAL_ZINDI
 git pull origin main
 
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
-export GOOGLE_APPLICATION_CREDENTIALS=/teamspace/studios/this_studio/waxal-sa.json
+export GDRIVE_TOKEN=/teamspace/studios/this_studio/token_drive.json
 export GDRIVE_FOLDER_ID=1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
 
-# See what will be packed
-ls -la $WAXAL_OUTPUTS_DIR
+# If packing already finished (from failed SA attempt):
+ls -lh /teamspace/studios/this_studio/gdrive_upload_work/*.tar.gz
+python scripts/upload_checkpoints_gdrive.py \
+  --langs lin,sna,lug \
+  --keep-archives \
+  --skip-pack
 
-# Upload all three languages (packs + resumable upload)
+# Or pack + upload:
 python scripts/upload_checkpoints_gdrive.py --langs lin,sna,lug --keep-archives
-
-# Or only languages you have ready:
-# python scripts/upload_checkpoints_gdrive.py --langs sna,lug --keep-archives
 ```
 
-Shortcut:
+### Part 3 — Verify
 
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/teamspace/studios/this_studio/waxal-sa.json
-python lightning_studio_bootstrap.py upload --langs lin,sna,lug --keep-archives
-```
+Open https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru  
 
-### Step 5 — Verify
-
-Open the folder in a browser. You should see files named like:
-
-```text
-lin_mms-300m_fold0.tar.gz
-sna_mms-300m_fold0.tar.gz
-lug_mms-300m_fold0.tar.gz
-```
-
-The script prints a link per file when done:
+You should see the `.tar.gz` files. Script also prints:
 
 ```text
 OK: https://drive.google.com/file/d/FILE_ID/view
 ```
 
-### If the upload drops mid-way
-
-Just re-run the **same command**.  
-
-- Local `.tar.gz` is kept if you used `--keep-archives` (so it won’t re-pack).  
-- Drive update is chunked; re-run overwrites/updates the same filename.
-
-Without `--keep-archives`, re-run will re-pack (slower but fine).
-
 ---
 
-## Alternative A: rclone (also good)
-
-If you already use rclone:
+## Alternative: rclone (also uses *your* quota)
 
 ```bash
-# One-time on a machine with browser (or follow rclone headless docs):
-rclone config
-# create remote name "gdrive", type Google Drive
+# Once (laptop): rclone config → Google Drive remote named "gdrive"
+# Copy ~/.config/rclone/rclone.conf onto Lightning
 
-# On Lightning (after rclone is installed + config copied):
-export RCLONE_REMOTE="gdrive:WAXAL_checkpoints"   # remote:folder
+export RCLONE_REMOTE="gdrive:WAXAL_checkpoints"
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
 
 cd /teamspace/studios/this_studio/WAXAL_ZINDI
 python scripts/upload_checkpoints_gdrive.py --langs lin,sna,lug --keep-archives
 ```
 
-If `RCLONE_REMOTE` is set, the script **uses rclone only** (skips Google API auth).
+If `RCLONE_REMOTE` is set, the script **skips** Google API auth and uses rclone.
 
 ---
 
-## Alternative B: Manual download (no Drive API)
-
-If auth is blocked and you only need a backup once:
-
-1. In Lightning file browser, open:  
-   `WAXAL_ZINDI/outputs/`
-2. Download each `*_mms-300m_fold0/` folder (or zip in terminal first):
+## Alternative: manual (no API)
 
 ```bash
-cd /teamspace/studios/this_studio/WAXAL_ZINDI/outputs
-tar -czf sna_mms-300m_fold0.tar.gz sna_mms-300m_fold0
-# then download the .tar.gz via the studio UI
+# Use already-packed archives if present:
+ls /teamspace/studios/this_studio/gdrive_upload_work/*.tar.gz
+# Download via Lightning file UI → drag into the Drive folder in the browser
 ```
 
-3. Drag the `.tar.gz` into the Drive folder in your browser.
+---
 
-This is **not** resumable API upload, but zero GCP setup.
+## Service account — only for Shared Drives
+
+Only if you use a **Google Workspace Shared Drive** (not a normal “My Drive” folder):
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/teamspace/studios/this_studio/waxal-sa.json
+export GDRIVE_USE_SERVICE_ACCOUNT=1
+export GDRIVE_FOLDER_ID=...   # folder id INSIDE Shared Drive
+python scripts/upload_checkpoints_gdrive.py --langs lin,sna,lug --keep-archives --use-service-account
+```
 
 ---
 
@@ -161,45 +157,38 @@ This is **not** resumable API upload, but zero GCP setup.
 
 | Error | Fix |
 |-------|-----|
-| `No Drive auth found` | Set `GOOGLE_APPLICATION_CREDENTIALS` to the SA JSON path |
-| `403` / permission denied | Share the **folder** with the **SA email** as Editor |
-| `Outputs dir missing` | `export WAXAL_OUTPUTS_DIR=.../WAXAL_ZINDI/outputs` |
-| `SKIP lin: no lin_mms-...` | That language folder is missing; train it first or omit from `--langs` |
-| Upload stalls | Re-run with `--keep-archives`; check studio disk free space for packing |
-| Folder empty after “success” | You may have uploaded under a different Google account / project — open the exact folder ID link above |
+| **Service Accounts do not have storage quota** | Use **OAuth `token_drive.json`**, not SA, for My Drive |
+| `No Drive auth found` | Run `--auth-only` on a laptop; copy token to studio |
+| `403` permission | OAuth as the **owner** of the folder |
+| `Outputs dir missing` | `export WAXAL_OUTPUTS_DIR=.../outputs` |
+| Re-pack is slow | `--keep-archives --skip-pack` after first pack |
 
 ---
 
-## Restore later (download)
-
-From Drive, download a `.tar.gz`, then on a new machine:
+## Restore later
 
 ```bash
 cd /teamspace/studios/this_studio/WAXAL_ZINDI
 mkdir -p outputs
 tar -xzf sna_mms-300m_fold0.tar.gz -C outputs/
-ls outputs/sna_mms-300m_fold0/checkpoints/
-ls outputs/sna_mms-300m_fold0/best_model/
 ```
-
-That restores Lightning-compatible checkpoint trees for `--resume` / submission.
 
 ---
 
-## Minimal cheat-sheet
+## Minimal cheat-sheet (OAuth)
 
 ```bash
-# 1) SA JSON on studio + folder shared with SA email
-export GOOGLE_APPLICATION_CREDENTIALS=/teamspace/studios/this_studio/waxal-sa.json
+# Laptop once:
+python scripts/upload_checkpoints_gdrive.py --auth-only
+# → copy token_drive.json to Lightning studio root
+
+# Lightning:
+unset GOOGLE_APPLICATION_CREDENTIALS
+export GDRIVE_TOKEN=/teamspace/studios/this_studio/token_drive.json
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
 export GDRIVE_FOLDER_ID=1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
 
 cd /teamspace/studios/this_studio/WAXAL_ZINDI
 git pull origin main
-
-# 2) Upload
-python scripts/upload_checkpoints_gdrive.py --langs lin,sna,lug --keep-archives
-
-# 3) Check
-# https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
+python scripts/upload_checkpoints_gdrive.py --langs lin,sna,lug --keep-archives --skip-pack
 ```
