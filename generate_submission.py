@@ -168,7 +168,10 @@ def _load_state_dict_file(weight_path):
         from safetensors.torch import load_file
 
         return load_file(weight_path)
-    return torch.load(weight_path, map_location="cpu")
+    try:
+        return torch.load(weight_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(weight_path, map_location="cpu")
 
 
 def _looks_like_peft_state_dict(state_dict):

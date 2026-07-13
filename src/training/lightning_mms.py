@@ -664,7 +664,11 @@ def train(args):
         best_ckpt = checkpoint_cb.best_model_path
         if best_ckpt and os.path.exists(best_ckpt):
             logger.info(f"Loading best checkpoint: {best_ckpt}")
-            ckpt = torch.load(best_ckpt, map_location="cpu")
+            # PyTorch 2.6+ defaults weights_only=True; Lightning ckpts need full unpickle.
+            try:
+                ckpt = torch.load(best_ckpt, map_location="cpu", weights_only=False)
+            except TypeError:
+                ckpt = torch.load(best_ckpt, map_location="cpu")
             state = ckpt.get("state_dict", ckpt)
             # Strip Lightning prefix if present
             cleaned = {}
