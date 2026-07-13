@@ -343,6 +343,18 @@ class WaxalMMSDataModule:
 
         gc.collect()
 
+    def _dataloader_kwargs(self, train: bool):
+        nw = int(self.train_cfg.get("num_workers", 0))
+        pin = bool(self.train_cfg.get("pin_memory", nw > 0))
+        kwargs = dict(
+            num_workers=nw,
+            pin_memory=pin,
+            persistent_workers=(nw > 0),
+        )
+        if nw > 0:
+            kwargs["prefetch_factor"] = int(self.train_cfg.get("prefetch_factor", 2))
+        return kwargs
+
     def train_dataloader(self):
         from torch.utils.data import DataLoader
 
@@ -356,11 +368,9 @@ class WaxalMMSDataModule:
             self.train_dataset,
             batch_size=int(self.train_cfg.get("per_device_train_batch_size", 4)),
             shuffle=True,
-            num_workers=int(self.train_cfg.get("num_workers", 0)),
             collate_fn=collator,
             drop_last=True,
-            pin_memory=False,
-            persistent_workers=False,
+            **self._dataloader_kwargs(train=True),
         )
 
     def val_dataloader(self):
@@ -376,11 +386,9 @@ class WaxalMMSDataModule:
             self.val_dataset,
             batch_size=int(self.train_cfg.get("per_device_eval_batch_size", 4)),
             shuffle=False,
-            num_workers=int(self.train_cfg.get("num_workers", 0)),
             collate_fn=collator,
             drop_last=False,
-            pin_memory=False,
-            persistent_workers=False,
+            **self._dataloader_kwargs(train=False),
         )
 
 

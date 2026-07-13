@@ -9,9 +9,12 @@ languages:
 
 training:
   learning_rate: 1.0e-4
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
+  # RTXP 6000 ~96–102GB VRAM: batch 16 only used ~23GB — scale up hard.
+  # If OOM: drop to 40 then 32. Target ~60–80% VRAM.
+  per_device_train_batch_size: 48
+  per_device_eval_batch_size: 32
   gradient_accumulation_steps: 1
+  # Effective batch 48 (was 16) — ~3× more audio per step
   num_train_epochs: 8
   max_steps: -1
   precision: "16-mixed"
@@ -20,9 +23,13 @@ training:
   weight_decay: 0.01
   log_every_n_steps: 25
   val_check_interval: 0.5
+  limit_val_batches: 0.5
   save_top_k: 2
-  max_audio_seconds: 16.0
-  num_workers: 8
+  max_audio_seconds: 20.0
+  # 125GB system RAM — feed the GPU; raise if CPU still idle
+  num_workers: 12
+  prefetch_factor: 4
+  pin_memory: true
 
 data:
   train_csv: "Train.csv"
