@@ -32,13 +32,27 @@ def compile_kenlm(kenlm_dir="kenlm"):
     logger.info("Running cmake for KenLM compilation...")
     # On Windows/Linux containers we run cmake and make
     try:
+        # Kaggle often lacks libboost-program-options-dev; try apt once (best-effort).
+        if not os.path.exists("/usr/include/boost/program_options.hpp"):
+            try:
+                subprocess.run(
+                    ["bash", "-lc", "apt-get update -qq && apt-get install -y -qq libboost-all-dev"],
+                    check=False,
+                    timeout=180,
+                )
+            except Exception:
+                pass
         subprocess.run(["cmake", ".."], cwd=build_dir, check=True)
         # Check system cores to speed up compilation
         import multiprocessing
         cores = multiprocessing.cpu_count()
         subprocess.run(["make", f"-j{cores}"], cwd=build_dir, check=True)
     except Exception as e:
-        logger.error(f"Failed to compile KenLM: {e}. Please ensure build-essential and cmake are installed.")
+        logger.error(
+            f"Failed to compile KenLM: {e}. "
+            "Training can continue without KenLM (greedy CTC decode). "
+            "Install libboost-all-dev + cmake for LM support."
+        )
         raise e
         
     logger.info("KenLM compiled successfully.")

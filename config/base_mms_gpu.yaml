@@ -31,10 +31,13 @@ data:
   train_csv: "Train.csv"
   test_csv: "Test.csv"
   duration_min: 1.5
-  duration_max: 16.0
+  duration_max: 30.0
   wps_min: 1.0
   wps_max: 8.0
   k_folds: 5
+  # Skip slow per-example audio decode filter (was ~6 min/lang and looked hung).
+  # Collator still truncates/pads to max_audio_seconds.
+  decode_duration_filter: false
   use_external_corpora: true
   external_corpora_sources:
     - common_voice

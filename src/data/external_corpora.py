@@ -104,19 +104,25 @@ def load_external_corpus(lang: str, sources: list = None) -> object:
             token = os.environ.get("HF_TOKEN")
             # Prefer split-by-split loads so a missing split does not fail the whole source.
             split_parts = []
+            load_attempts = [
+                # Modern parquet datasets (no custom script)
+                dict(path=dataset_id, name=config_name, trust_remote_code=True, token=token),
+                dict(path=dataset_id, name=config_name, token=token),
+            ]
             for split in cfg.get("splits", ["train"]):
-                try:
-                    part = load_dataset(
-                        dataset_id,
-                        config_name,
-                        split=split,
-                        trust_remote_code=True,
-                        token=token,
-                    )
-                    split_parts.append(part)
-                    logger.info(f"  Loaded split '{split}': {len(part)} examples")
-                except Exception as split_exc:
-                    logger.warning(f"  Split '{split}' failed for {dataset_id}: {split_exc}")
+                loaded = False
+                last_err = None
+                for base in load_attempts:
+                    try:
+                        part = load_dataset(**base, split=split)
+                        split_parts.append(part)
+                        logger.info(f"  Loaded split '{split}': {len(part)} examples")
+                        loaded = True
+                        break
+                    except Exception as split_exc:
+                        last_err = split_exc
+                if not loaded:
+                    logger.warning(f"  Split '{split}' failed for {dataset_id}: {last_err}")
 
             if not split_parts:
                 # Fallback: load whole dataset dict
@@ -128,8 +134,10 @@ def load_external_corpus(lang: str, sources: list = None) -> object:
                         token=token,
                     )
                     for split in cfg.get("splits", ["train"]):
-                        if split in ds:
+                        if hasattr(ds, "keys") and split in ds:
                             split_parts.append(ds[split])
+                        elif split == "train" and not hasattr(ds, "keys"):
+                            split_parts.append(ds)
                 except Exception as whole_exc:
                     logger.warning(f"  Full load failed for {dataset_id}: {whole_exc}")
 
@@ -157,26 +165,34 @@ def load_external_corpus(lang: str, sources: list = None) -> object:
                 ]
                 return batch
 
-            combined = combined.map(
-                _normalise,
+            # NOTE: do NOT pass decode_audio= to map() — removed/unsupported in many
+            # datasets versions and was killing FLEURS loads with:
+            #   Dataset.map() got an unexpected keyword argument 'decode_audio'
+            map_kwargs = dict(
                 batched=True,
                 batch_size=1000,
                 desc=f"Normalising {source}/{lang}",
-                decode_audio=False,
             )
+            # Prefer not decoding audio during the text-only normalisation pass.
+            try:
+                combined = combined.map(_normalise, **map_kwargs, load_from_cache_file=True)
+            except TypeError:
+                combined = combined.map(_normalise, **map_kwargs)
             global_idx += len(combined)
 
             # Drop every column except the three we need
             keep = {"audio", "normalized_transcription", "id"}
             drop = [c for c in combined.column_names if c not in keep]
-            combined = combined.remove_columns(drop)
+            if drop:
+                combined = combined.remove_columns(drop)
 
-            # Resample audio to 16 kHz to match WAXAL
-            combined = combined.cast_column("audio", Audio(sampling_rate=16000))
+            # Resample audio to 16 kHz to match WAXAL (lazy; does not decode all bytes yet)
+            if "audio" in combined.column_names:
+                combined = combined.cast_column("audio", Audio(sampling_rate=16000))
 
-            # Drop rows with empty transcription (silent/bad files) without decoding audio
+            # Drop rows with empty transcription without decoding audio
             combined = combined.filter(
-                lambda text: bool(text and text.strip()),
+                lambda text: bool(text and str(text).strip()),
                 input_columns=["normalized_transcription"],
                 desc=f"Removing empty transcriptions in {source}",
             )

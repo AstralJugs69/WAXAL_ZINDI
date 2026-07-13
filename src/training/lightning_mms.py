@@ -212,30 +212,55 @@ class WaxalMMSDataModule:
         self.train_dataset = _match_split(train_split_df)
         self.val_dataset = _match_split(val_split_df)
 
-        # Duration / WPS filter using decoded audio (once)
-        dmin = float(self.data_cfg.get("duration_min", 1.5))
-        dmax = float(self.data_cfg.get("duration_max", 16.0))
-        wmin = float(self.data_cfg.get("wps_min", 1.0))
-        wmax = float(self.data_cfg.get("wps_max", 8.0))
+        # Drop empty transcripts only (fast — no audio decode).
+        # Full duration/WPS decode filter is OPTIONAL: on Kaggle it runs ~35–40 ex/s and
+        # takes ~6+ min per language, looks like a hang, and was pruning 80%+ of data
+        # when duration_max=16 (collator already truncates/pads to max_audio_seconds).
+        def _has_text(example):
+            t = example.get("normalized_transcription") or example.get("transcription") or ""
+            return bool(str(t).strip())
 
-        def _ok(example):
-            from src.data.dataset import get_audio_data
+        self.train_dataset = self.train_dataset.filter(_has_text, desc="drop empty train text")
+        self.val_dataset = self.val_dataset.filter(_has_text, desc="drop empty val text")
+        logger.info(
+            f"After empty-text filter — train: {len(self.train_dataset)} | val: {len(self.val_dataset)}"
+        )
 
-            y, sr = get_audio_data(example["audio"])
-            if y is None or sr is None or sr <= 0:
-                return False
-            dur = len(y) / sr
-            if dur < dmin or dur > dmax:
-                return False
-            text = example.get("normalized_transcription") or ""
-            words = len(str(text).split())
-            wps = words / dur if dur > 0 else 0
-            return wmin <= wps <= wmax
+        if self.data_cfg.get("decode_duration_filter", False):
+            dmin = float(self.data_cfg.get("duration_min", 1.5))
+            dmax = float(self.data_cfg.get("duration_max", 30.0))
+            wmin = float(self.data_cfg.get("wps_min", 1.0))
+            wmax = float(self.data_cfg.get("wps_max", 8.0))
 
-        logger.info(f"Filtering train/val by duration [{dmin},{dmax}]s and WPS [{wmin},{wmax}]...")
-        self.train_dataset = self.train_dataset.filter(_ok, desc="filter train")
-        self.val_dataset = self.val_dataset.filter(_ok, desc="filter val")
-        logger.info(f"After filter — train: {len(self.train_dataset)} | val: {len(self.val_dataset)}")
+            def _ok(example):
+                from src.data.dataset import get_audio_data
+
+                y, sr = get_audio_data(example["audio"])
+                if y is None or sr is None or sr <= 0:
+                    return False
+                dur = len(y) / sr
+                if dur < dmin or dur > dmax:
+                    return False
+                text = example.get("normalized_transcription") or ""
+                words = len(str(text).split())
+                wps = words / dur if dur > 0 else 0
+                return wmin <= wps <= wmax
+
+            logger.info(
+                f"OPTIONAL decode filter duration [{dmin},{dmax}]s WPS [{wmin},{wmax}] "
+                f"(slow: ~30–40 ex/s)…"
+            )
+            nproc = int(self.data_cfg.get("filter_num_proc", 1))
+            filt_kwargs = {"desc": "filter train"}
+            if nproc > 1:
+                filt_kwargs["num_proc"] = nproc
+            self.train_dataset = self.train_dataset.filter(_ok, **filt_kwargs)
+            filt_kwargs["desc"] = "filter val"
+            self.val_dataset = self.val_dataset.filter(_ok, **filt_kwargs)
+            logger.info(
+                f"After duration/WPS filter — train: {len(self.train_dataset)} | "
+                f"val: {len(self.val_dataset)}"
+            )
 
         if self.data_cfg.get("use_external_corpora", False):
             try:
@@ -248,8 +273,17 @@ class WaxalMMSDataModule:
                     max_ext = int(self.data_cfg.get("external_max_samples", 50000))
                     if len(external) > max_ext:
                         external = external.shuffle(seed=42).select(range(max_ext))
+                    # Align columns before concat
+                    keep = {"audio", "normalized_transcription"}
+                    drop = [c for c in external.column_names if c not in keep]
+                    if drop:
+                        external = external.remove_columns(drop)
                     self.train_dataset = concatenate_datasets([self.train_dataset, external])
                     logger.info(f"Train size after external merge: {len(self.train_dataset)}")
+                else:
+                    logger.warning(
+                        f"No external corpora for {self.target_lang}; training on WAXAL only."
+                    )
             except Exception as exc:
                 logger.warning(f"External corpora merge failed ({exc}); continuing with WAXAL only.")
 
