@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+WAXAL — Lightning AI studio bootstrap (CPU data prep OR GPU train helpers)
+
+Paste/run this once per studio session instead of ad-hoc command dumps.
+
+Usage
+-----
+CPU prep (no GPU credits):
+  python lightning_studio_bootstrap.py prep
+
+GPU train all langs (after prep):
+  python lightning_studio_bootstrap.py train --langs lin,sna,lug
+
+GPU train one lang:
+  python lightning_studio_bootstrap.py train --lang lug --epochs 10 --batch-size 16 --resume
+
+Upload checkpoints to Google Drive (resumable):
+  python lightning_studio_bootstrap.py upload
+
+Env / files expected
+--------------------
+  kaggle.json  → /teamspace/studios/this_studio/kaggle.json  (for cache download)
+  HF_TOKEN     → optional (Common Voice only)
+  GOOGLE_APPLICATION_CREDENTIALS or client_secret.json → for Drive upload
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+STUDIO = Path(os.environ.get("LIGHTNING_STUDIO", "/teamspace/studios/this_studio"))
+REPO_URL = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
+REPO = STUDIO / "WAXAL_ZINDI"
+HF_HOME = Path(os.environ.get("HF_HOME", STUDIO / "hf_home"))
+OUTPUTS = Path(os.environ.get("WAXAL_OUTPUTS_DIR", REPO / "outputs"))
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB")
+
+
+def log(msg: str):
+    print(msg, flush=True)
+
+
+def run(cmd, check=True, env=None):
+    log("\n>>> " + " ".join(map(str, cmd)))
+    e = os.environ.copy()
+    if env:
+        e.update(env)
+    r = subprocess.run(list(map(str, cmd)), env=e)
+    if check and r.returncode != 0:
+        raise SystemExit(f"Command failed ({r.returncode}): {cmd}")
+    return r.returncode
+
+
+def configure_env():
+    HF_HOME.mkdir(parents=True, exist_ok=True)
+    OUTPUTS.mkdir(parents=True, exist_ok=True)
+    os.environ["HF_HOME"] = str(HF_HOME)
+    os.environ["HF_HUB_CACHE"] = str(HF_HOME / "hub")
+    os.environ["HF_DATASETS_CACHE"] = str(HF_HOME / "datasets")
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    os.environ["WAXAL_OUTPUTS_DIR"] = str(OUTPUTS)
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ.setdefault("GDRIVE_FOLDER_ID", GDRIVE_FOLDER_ID)
+    log(f"HF_HOME={HF_HOME}")
+    log(f"WAXAL_OUTPUTS_DIR={OUTPUTS}")
+    log(f"GDRIVE_FOLDER_ID={os.environ['GDRIVE_FOLDER_ID']}")
+
+
+def ensure_repo():
+    STUDIO.mkdir(parents=True, exist_ok=True)
+    if REPO.exists() and (REPO / ".git").exists():
+        run(["git", "-C", str(REPO), "pull", "origin", "main"], check=False)
+    else:
+        if REPO.exists():
+            shutil.rmtree(REPO, ignore_errors=True)
+        run(["git", "clone", "--depth", "1", REPO_URL, str(REPO)])
+    os.chdir(REPO)
+    sys.path.insert(0, str(REPO))
+    head = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    log(f"REPO={REPO} HEAD={head}")
+    return REPO
+
+
+def setup_kaggle_json():
+    dest = Path.home() / ".kaggle" / "kaggle.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        return True
+    for src in (
+        STUDIO / "kaggle.json",
+        REPO / "kaggle.json",
+        Path("kaggle.json"),
+    ):
+        if src.exists():
+            shutil.copy2(src, dest)
+            try:
+                dest.chmod(0o600)
+            except Exception:
+                pass
+            log(f"Installed kaggle.json from {src}")
+            return True
+    log("WARNING: kaggle.json not found (cache download may fail)")
+    return False
+
+
+def cmd_prep(args):
+    """CPU-only: cache extract + external + fold CSVs (no training)."""
+    configure_env()
+    ensure_repo()
+    setup_kaggle_json()
+    os.chdir(REPO)
+    # Prefer dedicated prep script (download Kaggle chunks + models + external + folds)
+    run([sys.executable, "scripts/setup_data_cpu.py", "--repo", str(REPO)], check=False)
+    log("\n=== PREP DONE (no training) ===")
+    log("Next (GPU machine): python lightning_studio_bootstrap.py train --lang lug --epochs 10")
+
+
+def cmd_train(args):
+    """GPU train one or more languages with the proven recipe."""
+    configure_env()
+    ensure_repo()
+    os.chdir(REPO)
+
+    run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "lightning",
+            "transformers>=4.40.0",
+            "datasets>=2.19.0,<4.0.0",
+            "accelerate",
+            "librosa",
+            "soundfile",
+            "jiwer",
+            "pyyaml",
+            "scikit-learn",
+            "evaluate",
+            "tqdm",
+        ],
+        check=False,
+    )
+
+    if args.lang:
+        langs = [args.lang]
+    else:
+        langs = [x.strip() for x in args.langs.split(",") if x.strip()]
+
+    for lang in langs:
+        epochs = args.epochs
+        cmd = [
+            sys.executable,
+            "-m",
+            "src.training.lightning_mms",
+            "--config",
+            args.config,
+            "--target_lang",
+            lang,
+            "--fold",
+            str(args.fold),
+            "--devices",
+            str(args.devices),
+            "--epochs",
+            str(epochs),
+            "--batch_size",
+            str(args.batch_size),
+            "--lr",
+            str(args.lr),
+            "--unfreeze_feature_encoder",
+            "--no_early_stopping",
+        ]
+        if args.resume:
+            cmd.append("--resume")
+        log(f"\n===== TRAIN {lang} epochs={epochs} batch={args.batch_size} lr={args.lr} =====")
+        run(cmd, check=False)
+
+    log("\n=== TRAIN COMMANDS FINISHED ===")
+    log(f"Checkpoints: {OUTPUTS}/{{lin,sna,lug}}_mms-300m_fold{args.fold}/")
+
+
+def cmd_upload(args):
+    configure_env()
+    ensure_repo()
+    os.chdir(REPO)
+    cmd = [
+        sys.executable,
+        "scripts/upload_checkpoints_gdrive.py",
+        "--outputs",
+        str(OUTPUTS),
+        "--folder-id",
+        args.folder_id or os.environ["GDRIVE_FOLDER_ID"],
+        "--langs",
+        args.langs,
+    ]
+    if args.keep_archives:
+        cmd.append("--keep-archives")
+    run(cmd, check=False)
+
+
+def cmd_submit(args):
+    configure_env()
+    ensure_repo()
+    os.chdir(REPO)
+    run(
+        [sys.executable, "generate_submission.py", "--max-blank-frac", str(args.max_blank_frac)],
+        check=False,
+    )
+    sub = REPO / "submission.csv"
+    if sub.exists():
+        dest = STUDIO / "submission.csv"
+        shutil.copy2(sub, dest)
+        log(f"submission.csv → {dest}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="WAXAL Lightning studio bootstrap")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_prep = sub.add_parser("prep", help="CPU data prep (Kaggle cache + external + folds)")
+    p_prep.set_defaults(func=cmd_prep)
+
+    p_train = sub.add_parser("train", help="GPU train MMS (Lightning)")
+    p_train.add_argument("--lang", type=str, default=None, help="Single language lin|sna|lug")
+    p_train.add_argument("--langs", type=str, default="lin,sna,lug")
+    p_train.add_argument("--epochs", type=int, default=8)
+    p_train.add_argument("--batch-size", type=int, default=16)
+    p_train.add_argument("--lr", type=float, default=3e-4)
+    p_train.add_argument("--fold", type=int, default=0)
+    p_train.add_argument("--devices", type=int, default=1)
+    p_train.add_argument("--resume", action="store_true")
+    p_train.add_argument("--config", type=str, default="config/base_mms_lightning_96gb.yaml")
+    p_train.set_defaults(func=cmd_train)
+
+    p_up = sub.add_parser("upload", help="Upload checkpoints to Google Drive (resumable)")
+    p_up.add_argument("--langs", type=str, default="lin,sna,lug")
+    p_up.add_argument("--folder-id", type=str, default=None)
+    p_up.add_argument("--keep-archives", action="store_true")
+    p_up.set_defaults(func=cmd_upload)
+
+    p_sub = sub.add_parser("submit", help="Generate submission.csv")
+    p_sub.add_argument("--max-blank-frac", type=float, default=0.05)
+    p_sub.set_defaults(func=cmd_submit)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
