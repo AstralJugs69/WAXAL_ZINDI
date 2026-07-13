@@ -457,10 +457,14 @@ def train(args):
         precision = train_cfg.get("precision", "bf16-true")
         logger.info(f"TPU mode: devices={devices}, precision={precision}")
     else:
-        accelerator = "auto"
-        devices = "auto"
+        accelerator = "gpu" if torch.cuda.is_available() else "auto"
+        # Honour --devices on multi-GPU (e.g. Kaggle 2x T4); fall back to all visible GPUs.
+        if args.devices and args.devices > 0 and torch.cuda.is_available():
+            devices = min(args.devices, torch.cuda.device_count())
+        else:
+            devices = "auto"
         precision = "16-mixed" if torch.cuda.is_available() else "32-true"
-        logger.info(f"Non-TPU mode: accelerator=auto, precision={precision}")
+        logger.info(f"GPU/CPU mode: accelerator={accelerator}, devices={devices}, precision={precision}")
 
     trainer = pl.Trainer(
         accelerator=accelerator,

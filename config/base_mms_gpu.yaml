@@ -1,0 +1,48 @@
+# MMS-300M config for Kaggle 2x T4 (16GB each).
+# Run in parallel with the TPU notebook — separate session, separate /kaggle/working.
+model_id: "facebook/mms-300m"
+model_family: "mms"
+languages:
+  - "lin"
+  - "sna"
+  - "lug"
+
+training:
+  learning_rate: 1.0e-4
+  # Safer per-GPU batch for 16s audio on 16GB T4; raise to 4 if no OOM.
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 2
+  # Effective global batch ≈ 2 * 2 GPUs * 2 accum = 8
+  num_train_epochs: 8
+  max_steps: -1
+  precision: "16-mixed"
+  gradient_clip_val: 1.0
+  warmup_steps: 200
+  weight_decay: 0.01
+  log_every_n_steps: 25
+  val_check_interval: 0.5
+  save_top_k: 2
+  max_audio_seconds: 16.0
+  # GPUs tolerate a couple of workers; keep modest to avoid RAM blowups.
+  num_workers: 2
+
+data:
+  train_csv: "Train.csv"
+  test_csv: "Test.csv"
+  duration_min: 1.5
+  duration_max: 16.0
+  wps_min: 1.0
+  wps_max: 8.0
+  k_folds: 5
+  use_external_corpora: true
+  external_corpora_sources:
+    - common_voice
+    - fleurs
+  external_max_samples: 50000
+
+decoding:
+  beam_width: 128
+  alpha: 0.5
+  beta: 1.5
+  build_kenlm_after_train: true
