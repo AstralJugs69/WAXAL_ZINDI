@@ -643,12 +643,18 @@ def train(args):
             logger.warning(f" --resume set but no .ckpt under {ckpt_dir}; training from scratch.")
 
     logger.info("Starting Lightning training...")
-    trainer.fit(
-        lit_module,
+    fit_kwargs = dict(
+        model=lit_module,
         train_dataloaders=dm.train_dataloader(),
         val_dataloaders=dm.val_dataloader(),
         ckpt_path=ckpt_path if ckpt_path and os.path.exists(ckpt_path) else None,
     )
+    # PyTorch 2.6+ / Lightning: resume needs full unpickle of trusted local .ckpt files
+    import inspect
+
+    if "weights_only" in inspect.signature(trainer.fit).parameters:
+        fit_kwargs["weights_only"] = False
+    trainer.fit(**fit_kwargs)
 
     # Save final weights from rank 0 only
     is_rank0 = True
