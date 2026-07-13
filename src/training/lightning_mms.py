@@ -499,15 +499,25 @@ def train(args):
     dm = WaxalMMSDataModule(config, target_lang, fold, processor)
     dm.setup()
 
-    # Estimate steps for scheduler
-    steps_per_epoch = max(1, len(dm.train_dataset) // max(1, int(train_cfg.get("per_device_train_batch_size", 4)) * 8))
+    # Estimate steps for scheduler / progress display
+    batch_size = max(1, int(train_cfg.get("per_device_train_batch_size", 4)))
+    steps_per_epoch = max(1, len(dm.train_dataset) // batch_size)
     max_epochs = int(args.epochs if args.epochs > 0 else train_cfg.get("num_train_epochs", 8))
     max_steps = int(args.max_steps if args.max_steps and args.max_steps > 0 else train_cfg.get("max_steps", -1))
     if max_steps and max_steps > 0:
         total_steps = max_steps
-        max_epochs = 1000  # let max_steps dominate
+        # Cap epochs so the UI never shows Epoch x/999 (credit scare).
+        # Trainer still stops at max_steps first.
+        max_epochs = max(1, min(max_epochs, (max_steps + steps_per_epoch - 1) // steps_per_epoch))
     else:
         total_steps = steps_per_epoch * max_epochs
+        max_steps = -1
+
+    logger.info(
+        f"Schedule: train_size={len(dm.train_dataset)} batch={batch_size} "
+        f"steps/epoch≈{steps_per_epoch} max_epochs={max_epochs} max_steps={max_steps} "
+        f"(training STOPS at whichever limit hits first)"
+    )
 
     lit_module = build_lightning_module(
         model=model,
@@ -518,7 +528,7 @@ def train(args):
     )
 
     import lightning.pytorch as pl
-    from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+    from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 
     checkpoint_cb = ModelCheckpoint(
         dirpath=os.path.join(output_dir, "checkpoints"),
@@ -529,6 +539,18 @@ def train(args):
         save_last=True,
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
+    callbacks = [checkpoint_cb, lr_monitor]
+    # Stop early when val stops improving — protects credits
+    if train_cfg.get("early_stopping", True):
+        callbacks.append(
+            EarlyStopping(
+                monitor="val_loss",
+                mode="min",
+                patience=int(train_cfg.get("early_stopping_patience", 3)),
+                min_delta=float(train_cfg.get("early_stopping_min_delta", 0.01)),
+                verbose=True,
+            )
+        )
 
     # accelerator:
     #   - "tpu" when --tpu or TPU hardware present
@@ -568,7 +590,7 @@ def train(args):
         log_every_n_steps=int(train_cfg.get("log_every_n_steps", 25)),
         val_check_interval=float(train_cfg.get("val_check_interval", 1.0)),
         limit_val_batches=float(train_cfg.get("limit_val_batches", 0.25 if not use_tpu else 1.0)),
-        callbacks=[checkpoint_cb, lr_monitor],
+        callbacks=callbacks,
         enable_progress_bar=True,
         num_sanity_val_steps=0,
         deterministic=False,

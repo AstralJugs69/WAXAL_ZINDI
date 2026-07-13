@@ -14,9 +14,10 @@ training:
   per_device_train_batch_size: 48
   per_device_eval_batch_size: 32
   gradient_accumulation_steps: 1
-  # Effective batch 48 (was 16) — ~3× more audio per step
-  num_train_epochs: 8
-  max_steps: -1
+  # Effective batch 48 — more audio per step on 96GB cards
+  # HARD CAP: never rely on 999-epoch UI artifact. Prefer max_steps + early stop.
+  num_train_epochs: 6
+  max_steps: 2500
   precision: "16-mixed"
   gradient_clip_val: 1.0
   warmup_steps: 200
@@ -25,6 +26,9 @@ training:
   val_check_interval: 0.5
   limit_val_batches: 0.5
   save_top_k: 2
+  early_stopping: true
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.01
   max_audio_seconds: 20.0
   # 125GB system RAM — feed the GPU; raise if CPU still idle
   num_workers: 12
