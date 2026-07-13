@@ -469,7 +469,10 @@ def train(args):
     with open(args.config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    train_cfg = dict(config["training"])  # shallow copy so CLI overrides are local
+    # Mutable training section so CLI overrides apply to Trainer + DataLoader
+    config = dict(config)
+    config["training"] = dict(config.get("training") or {})
+    train_cfg = config["training"]
     data_cfg = config["data"]
     model_id = config["model_id"]
     target_lang = args.target_lang
@@ -487,7 +490,7 @@ def train(args):
 
     logger.info(f"Loading processor/model for {target_lang}...")
     processor = load_processor_for_mms(model_id=model_id, target_lang=target_lang)
-    freeze_fe = bool(config.get("training", {}).get("freeze_feature_encoder", True))
+    freeze_fe = bool(train_cfg.get("freeze_feature_encoder", True))
     if getattr(args, "unfreeze_feature_encoder", False):
         freeze_fe = False
     model = get_mms_model_with_adapter(
