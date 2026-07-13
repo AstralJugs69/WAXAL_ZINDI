@@ -469,11 +469,15 @@ def train(args):
     with open(args.config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    train_cfg = config["training"]
+    train_cfg = dict(config["training"])  # shallow copy so CLI overrides are local
     data_cfg = config["data"]
     model_id = config["model_id"]
     target_lang = args.target_lang
     fold = args.fold
+    if getattr(args, "batch_size", None) and args.batch_size > 0:
+        train_cfg["per_device_train_batch_size"] = int(args.batch_size)
+        train_cfg["per_device_eval_batch_size"] = max(1, int(args.batch_size) // 2)
+        logger.info(f"CLI batch override: train={args.batch_size}")
 
     output_dir = f"{get_outputs_dir()}/{target_lang}_mms-300m_fold{fold}"
     os.makedirs(output_dir, exist_ok=True)
@@ -483,10 +487,13 @@ def train(args):
 
     logger.info(f"Loading processor/model for {target_lang}...")
     processor = load_processor_for_mms(model_id=model_id, target_lang=target_lang)
+    freeze_fe = bool(config.get("training", {}).get("freeze_feature_encoder", True))
+    if getattr(args, "unfreeze_feature_encoder", False):
+        freeze_fe = False
     model = get_mms_model_with_adapter(
         model_id=model_id,
         target_lang=target_lang,
-        freeze_feature_extractor=True,
+        freeze_feature_extractor=freeze_fe,
         processor=processor,
         torch_dtype=None,  # Lightning precision handles casting on TPU
     )
@@ -527,9 +534,13 @@ def train(args):
         f"(stops at first limit hit)"
     )
 
+    lr = float(args.lr) if getattr(args, "lr", None) and args.lr > 0 else float(
+        train_cfg.get("learning_rate", 1e-4)
+    )
+    logger.info(f"Optimizer lr={lr} freeze_feature_encoder={freeze_fe}")
     lit_module = build_lightning_module(
         model=model,
-        lr=float(train_cfg.get("learning_rate", 1e-4)),
+        lr=lr,
         weight_decay=float(train_cfg.get("weight_decay", 0.01)),
         warmup_steps=int(train_cfg.get("warmup_steps", 200)),
         total_steps=total_steps,
@@ -692,6 +703,18 @@ def parse_args(argv=None):
         "--no_early_stopping",
         action="store_true",
         help="Disable EarlyStopping (train full epoch budget)",
+    )
+    p.add_argument("--lr", type=float, default=-1.0, help="Override learning rate (e.g. 3e-4)")
+    p.add_argument(
+        "--unfreeze_feature_encoder",
+        action="store_true",
+        help="Train CNN feature encoder too (helps stuck languages)",
+    )
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=-1,
+        help="Override per_device_train/eval batch size",
     )
     return p.parse_args(argv)
 
