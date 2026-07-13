@@ -1,9 +1,9 @@
 # Upload WAXAL checkpoints to Google Drive
 
-**Target folder (from project handover):**  
-https://drive.google.com/drive/folders/1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB  
+**Target folder:**  
+https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru  
 
-**Folder ID:** `1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB`
+**Folder ID:** `1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru`
 
 **What gets uploaded:**  
 For each language that has a folder like:
@@ -47,7 +47,7 @@ OAuth browser login is awkward on remote studios. A **service account** is the r
 
 ### Step 2 — Share the Drive folder with the service account
 
-1. Open: https://drive.google.com/drive/folders/1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB  
+1. Open: https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru  
 2. **Share** → add the **service account email**  
 3. Role: **Editor**  
 4. Uncheck “Notify people” if you want → Share  
@@ -70,7 +70,7 @@ git pull origin main
 
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
 export GOOGLE_APPLICATION_CREDENTIALS=/teamspace/studios/this_studio/waxal-sa.json
-export GDRIVE_FOLDER_ID=1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB
+export GDRIVE_FOLDER_ID=1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
 
 # See what will be packed
 ls -la $WAXAL_OUTPUTS_DIR
@@ -192,7 +192,7 @@ That restores Lightning-compatible checkpoint trees for `--resume` / submission.
 # 1) SA JSON on studio + folder shared with SA email
 export GOOGLE_APPLICATION_CREDENTIALS=/teamspace/studios/this_studio/waxal-sa.json
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
-export GDRIVE_FOLDER_ID=1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB
+export GDRIVE_FOLDER_ID=1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
 
 cd /teamspace/studios/this_studio/WAXAL_ZINDI
 git pull origin main

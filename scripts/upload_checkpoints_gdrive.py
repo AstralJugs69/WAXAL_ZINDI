@@ -2,9 +2,9 @@
 """
 Upload WAXAL training outputs to Google Drive (resumable).
 
-Default folder (from bootstrap/handover.md):
-  https://drive.google.com/drive/folders/1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB
-  Folder ID: 1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB
+Default folder (WAXAL checkpoints):
+  https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
+  Folder ID: 1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru
 
 Auth (pick one):
   1) Service account JSON:
@@ -32,7 +32,7 @@ import tarfile
 import time
 from pathlib import Path
 
-DEFAULT_FOLDER_ID = "1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB"
+DEFAULT_FOLDER_ID = "1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru"
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 

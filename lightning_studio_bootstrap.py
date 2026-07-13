@@ -38,7 +38,7 @@ REPO_URL = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
 REPO = STUDIO / "WAXAL_ZINDI"
 HF_HOME = Path(os.environ.get("HF_HOME", STUDIO / "hf_home"))
 OUTPUTS = Path(os.environ.get("WAXAL_OUTPUTS_DIR", REPO / "outputs"))
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru")
 
 
 def log(msg: str):
