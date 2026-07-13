@@ -649,12 +649,29 @@ def train(args):
         val_dataloaders=dm.val_dataloader(),
         ckpt_path=ckpt_path if ckpt_path and os.path.exists(ckpt_path) else None,
     )
-    # PyTorch 2.6+ / Lightning: resume needs full unpickle of trusted local .ckpt files
+    # PyTorch 2.6+ defaults weights_only=True; Lightning ckpts need full unpickle.
     import inspect
 
     if "weights_only" in inspect.signature(trainer.fit).parameters:
         fit_kwargs["weights_only"] = False
-    trainer.fit(**fit_kwargs)
+    else:
+        # Older Lightning: force torch.load to allow local checkpoint resume
+        _orig_torch_load = torch.load
+
+        def _torch_load_trusted(*a, **k):
+            k.setdefault("weights_only", False)
+            try:
+                return _orig_torch_load(*a, **k)
+            except TypeError:
+                k.pop("weights_only", None)
+                return _orig_torch_load(*a, **k)
+
+        torch.load = _torch_load_trusted  # type: ignore[assignment]
+    try:
+        trainer.fit(**fit_kwargs)
+    finally:
+        if "weights_only" not in inspect.signature(trainer.fit).parameters:
+            torch.load = _orig_torch_load  # type: ignore[assignment]
 
     # Save final weights from rank 0 only
     is_rank0 = True
