@@ -502,12 +502,20 @@ def train(args):
     # Estimate steps for scheduler / progress display
     batch_size = max(1, int(train_cfg.get("per_device_train_batch_size", 4)))
     steps_per_epoch = max(1, len(dm.train_dataset) // batch_size)
-    max_epochs = int(args.epochs if args.epochs > 0 else train_cfg.get("num_train_epochs", 8))
-    max_steps = int(args.max_steps if args.max_steps and args.max_steps > 0 else train_cfg.get("max_steps", -1))
+    # Explicit --epochs wins over config max_steps (so "train to 15 epochs" works).
+    explicit_epochs = args.epochs is not None and args.epochs > 0
+    explicit_steps = args.max_steps is not None and args.max_steps > 0
+    max_epochs = int(args.epochs if explicit_epochs else train_cfg.get("num_train_epochs", 8))
+    if explicit_steps:
+        max_steps = int(args.max_steps)
+    elif explicit_epochs:
+        max_steps = -1  # pure epoch schedule
+    else:
+        max_steps = int(train_cfg.get("max_steps", -1) or -1)
+
     if max_steps and max_steps > 0:
         total_steps = max_steps
-        # Cap epochs so the UI never shows Epoch x/999 (credit scare).
-        # Trainer still stops at max_steps first.
+        # Cap displayed epochs when step-limited (avoid Epoch x/999).
         max_epochs = max(1, min(max_epochs, (max_steps + steps_per_epoch - 1) // steps_per_epoch))
     else:
         total_steps = steps_per_epoch * max_epochs
@@ -516,7 +524,7 @@ def train(args):
     logger.info(
         f"Schedule: train_size={len(dm.train_dataset)} batch={batch_size} "
         f"steps/epoch≈{steps_per_epoch} max_epochs={max_epochs} max_steps={max_steps} "
-        f"(training STOPS at whichever limit hits first)"
+        f"(stops at first limit hit)"
     )
 
     lit_module = build_lightning_module(
@@ -540,8 +548,9 @@ def train(args):
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
     callbacks = [checkpoint_cb, lr_monitor]
-    # Stop early when val stops improving — protects credits
-    if train_cfg.get("early_stopping", True):
+    # Stop early when val stops improving — protects credits (disable with --no_early_stopping)
+    use_early_stop = train_cfg.get("early_stopping", True) and not getattr(args, "no_early_stopping", False)
+    if use_early_stop:
         callbacks.append(
             EarlyStopping(
                 monitor="val_loss",
@@ -596,8 +605,36 @@ def train(args):
         deterministic=False,
     )
 
+    # Resume from last/best Lightning ckpt if requested
+    ckpt_path = getattr(args, "ckpt_path", None) or None
+    if getattr(args, "resume", False) and not ckpt_path:
+        ckpt_dir = os.path.join(output_dir, "checkpoints")
+        candidates = []
+        if os.path.isdir(ckpt_dir):
+            candidates = [
+                os.path.join(ckpt_dir, f)
+                for f in os.listdir(ckpt_dir)
+                if f.endswith(".ckpt")
+            ]
+        last = os.path.join(ckpt_dir, "last.ckpt")
+        if os.path.exists(last):
+            ckpt_path = last
+        elif candidates:
+            # newest mtime
+            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            ckpt_path = candidates[0]
+        if ckpt_path:
+            logger.info(f"Resuming from checkpoint: {ckpt_path}")
+        else:
+            logger.warning(f" --resume set but no .ckpt under {ckpt_dir}; training from scratch.")
+
     logger.info("Starting Lightning training...")
-    trainer.fit(lit_module, train_dataloaders=dm.train_dataloader(), val_dataloaders=dm.val_dataloader())
+    trainer.fit(
+        lit_module,
+        train_dataloaders=dm.train_dataloader(),
+        val_dataloaders=dm.val_dataloader(),
+        ckpt_path=ckpt_path if ckpt_path and os.path.exists(ckpt_path) else None,
+    )
 
     # Save final weights from rank 0 only
     is_rank0 = True
@@ -647,8 +684,15 @@ def parse_args(argv=None):
     p.add_argument("--fold", type=int, default=0)
     p.add_argument("--tpu", action="store_true", help="Force TPU accelerator")
     p.add_argument("--devices", type=int, default=8, help="TPU cores (Kaggle v5e-8 => 8)")
-    p.add_argument("--max_steps", type=int, default=-1)
-    p.add_argument("--epochs", type=int, default=-1)
+    p.add_argument("--max_steps", type=int, default=-1, help="Step cap (-1 = use epochs only)")
+    p.add_argument("--epochs", type=int, default=-1, help="Epoch cap (overrides config max_steps if set)")
+    p.add_argument("--resume", action="store_true", help="Resume from last/best .ckpt in output dir")
+    p.add_argument("--ckpt_path", type=str, default=None, help="Explicit Lightning .ckpt to resume")
+    p.add_argument(
+        "--no_early_stopping",
+        action="store_true",
+        help="Disable EarlyStopping (train full epoch budget)",
+    )
     return p.parse_args(argv)
 
 
