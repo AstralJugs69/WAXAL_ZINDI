@@ -4,57 +4,105 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def compile_kenlm(kenlm_dir="kenlm"):
+def _try_install_kenlm_system_deps():
+    """Best-effort apt install of Boost + Eigen on Debian/Ubuntu (e.g. Kaggle)."""
+    if os.name == "nt":
+        return
+    need_boost = not os.path.exists("/usr/include/boost/program_options.hpp")
+    need_eigen = not (
+        os.path.exists("/usr/include/eigen3")
+        or os.path.exists("/usr/local/include/eigen3")
+    )
+    if not need_boost and not need_eigen:
+        return
+    pkgs = []
+    if need_boost:
+        pkgs.extend(["libboost-all-dev", "libboost-program-options-dev"])
+    if need_eigen:
+        pkgs.append("libeigen3-dev")
+    if not pkgs:
+        return
+    # Prefer sudo when available (Kaggle notebooks often allow passwordless sudo).
+    for prefix in (["sudo", "-n"], []):
+        cmd = prefix + ["apt-get", "update", "-qq"]
+        try:
+            subprocess.run(cmd, check=False, timeout=120, capture_output=True)
+            install = prefix + ["apt-get", "install", "-y", "-qq"] + pkgs
+            r = subprocess.run(install, check=False, timeout=300, capture_output=True)
+            if r.returncode == 0:
+                logger.info(f"Installed system deps for KenLM: {pkgs}")
+                return
+        except Exception as exc:
+            logger.debug(f"apt via {prefix or 'user'}: {exc}")
+    logger.warning(
+        "Could not apt-install KenLM deps (boost/eigen). "
+        "LM build will be skipped unless they are already present."
+    )
+
+
+def compile_kenlm(kenlm_dir="kenlm", strict=False):
     """
-    Downloads and compiles the KenLM C++ codebase in the environment.
+    Downloads and compiles the KenLM C++ codebase.
+
+    Parameters
+    ----------
+    kenlm_dir : str
+        Checkout / build directory.
+    strict : bool
+        If True, re-raise on failure. If False (default), log and return (None, None)
+        so training can continue with greedy CTC decode.
+
+    Returns
+    -------
+    (lmplz_path, build_binary_path) or (None, None) on soft failure.
     """
     logger.info("Checking for KenLM binaries...")
     lmplz_path = os.path.join(kenlm_dir, "build", "bin", "lmplz")
     build_binary_path = os.path.join(kenlm_dir, "build", "bin", "build_binary")
-    
+
     if os.path.exists(lmplz_path) and os.path.exists(build_binary_path):
         logger.info("KenLM binaries already compiled and available.")
         return lmplz_path, build_binary_path
-        
+
     logger.info("KenLM binaries not found. Cloning and compiling KenLM...")
-    
-    # 1. Clone repo if it doesn't exist
-    if not os.path.exists(kenlm_dir):
-        subprocess.run(
-            ["git", "clone", "https://github.com/kpu/kenlm.git", kenlm_dir],
-            check=True
-        )
-        
-    # 2. Compile KenLM using cmake
-    build_dir = os.path.join(kenlm_dir, "build")
-    os.makedirs(build_dir, exist_ok=True)
-    
-    logger.info("Running cmake for KenLM compilation...")
-    # On Windows/Linux containers we run cmake and make
+
     try:
-        # Kaggle often lacks libboost-program-options-dev; try apt once (best-effort).
-        if not os.path.exists("/usr/include/boost/program_options.hpp"):
-            try:
-                subprocess.run(
-                    ["bash", "-lc", "apt-get update -qq && apt-get install -y -qq libboost-all-dev"],
-                    check=False,
-                    timeout=180,
-                )
-            except Exception:
-                pass
+        _try_install_kenlm_system_deps()
+
+        if not os.path.exists(kenlm_dir):
+            subprocess.run(
+                ["git", "clone", "https://github.com/kpu/kenlm.git", kenlm_dir],
+                check=True,
+            )
+
+        build_dir = os.path.join(kenlm_dir, "build")
+        os.makedirs(build_dir, exist_ok=True)
+
+        logger.info("Running cmake for KenLM compilation...")
         subprocess.run(["cmake", ".."], cwd=build_dir, check=True)
-        # Check system cores to speed up compilation
         import multiprocessing
+
         cores = multiprocessing.cpu_count()
         subprocess.run(["make", f"-j{cores}"], cwd=build_dir, check=True)
     except Exception as e:
-        logger.error(
-            f"Failed to compile KenLM: {e}. "
-            "Training can continue without KenLM (greedy CTC decode). "
-            "Install libboost-all-dev + cmake for LM support."
+        msg = (
+            f"KenLM compile skipped ({e}). "
+            "Training continues with greedy CTC decode (no lm.bin). "
+            "Optional fix: sudo apt-get install -y libboost-all-dev libeigen3-dev"
         )
-        raise e
-        
+        if strict:
+            logger.error(msg)
+            raise
+        logger.warning(msg)
+        return None, None
+
+    if not (os.path.exists(lmplz_path) and os.path.exists(build_binary_path)):
+        msg = "KenLM build finished but lmplz/build_binary missing."
+        if strict:
+            raise FileNotFoundError(msg)
+        logger.warning(msg)
+        return None, None
+
     logger.info("KenLM compiled successfully.")
     return lmplz_path, build_binary_path
 
@@ -106,26 +154,30 @@ def build_interpolated_text_corpus(conversational_path, formal_path, output_path
 def train_kenlm_model(text_path, arpa_path, binary_path, kenlm_dir="kenlm"):
     """
     Runs KenLM binaries to compile the text corpus into a compressed trie binary model.
+    Returns None if KenLM is unavailable.
     """
-    lmplz_path, build_binary_path = compile_kenlm(kenlm_dir)
-    
+    lmplz_path, build_binary_path = compile_kenlm(kenlm_dir, strict=False)
+    if not lmplz_path or not build_binary_path:
+        logger.warning("KenLM unavailable — skipping train_kenlm_model.")
+        return None
+
     logger.info(f"Training 5-gram language model using {lmplz_path}...")
-    # Run lmplz command
-    with open(arpa_path, "w", encoding="utf-8") as arpa_file:
+    with open(text_path, "r", encoding="utf-8") as stdin_fh, open(
+        arpa_path, "w", encoding="utf-8"
+    ) as arpa_file:
         subprocess.run(
-            [lmplz_path, "-o", "5"],
-            stdin=open(text_path, "r", encoding="utf-8"),
+            [lmplz_path, "-o", "5", "--discount_fallback"],
+            stdin=stdin_fh,
             stdout=arpa_file,
-            check=True
+            check=True,
         )
-        
+
     logger.info(f"Compressing language model to trie binary format using {build_binary_path}...")
-    # Run build_binary command
     subprocess.run(
         [build_binary_path, "trie", arpa_path, binary_path],
-        check=True
+        check=True,
     )
-    
+
     logger.info(f"Successfully compiled KenLM model: {binary_path}")
     return binary_path
 
@@ -161,10 +213,9 @@ def build_language_model(transcripts, output_dir, kenlm_dir="kenlm", order=5):
         logger.info(f"LM binary already exists at {binary_path}. Skipping rebuild.")
         return binary_path
 
-    try:
-        lmplz_path, build_binary_path = compile_kenlm(kenlm_dir)
-    except Exception as exc:
-        logger.warning(f"KenLM binaries not available ({exc}). Skipping LM build.")
+    lmplz_path, build_binary_path = compile_kenlm(kenlm_dir, strict=False)
+    if not lmplz_path or not build_binary_path:
+        logger.warning("KenLM binaries not available. Skipping LM build.")
         return None
 
     # 1. Write transcript corpus to plain-text file

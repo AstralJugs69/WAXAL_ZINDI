@@ -57,13 +57,17 @@ pip install -c constraints.txt -r requirements.txt
 # Install pyctcdecode separately with --no-deps to avoid its numpy<2 pin conflicting with numpy 2.x on TPU
 pip install pyctcdecode>=0.5.0 --no-deps
 
-echo "=== Compiling KenLM ==="
-# Trigger our automated compilation utility
+echo "=== Compiling KenLM (optional) ==="
+# Soft-fail: training works without KenLM (greedy CTC).
 python -c "
 import sys
 sys.path.append('src')
-from decoding.kenlm_utils import compile_kenlm
-compile_kenlm('kenlm')
-"
+try:
+    from decoding.kenlm_utils import compile_kenlm
+except ImportError:
+    from src.decoding.kenlm_utils import compile_kenlm
+paths = compile_kenlm('kenlm', strict=False)
+print('KenLM OK:', paths[0] if paths[0] else 'skipped')
+" || true
 
 echo "=== Installation Completed Successfully ==="

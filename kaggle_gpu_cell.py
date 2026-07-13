@@ -201,13 +201,20 @@ run([
     "pyctcdecode",
 ], check=False)
 
-try:
-    log("Compiling KenLM (optional)…")
-    run([sys.executable, "-c",
-         "from src.decoding.kenlm_utils import compile_kenlm; compile_kenlm('kenlm')"],
-        check=False)
-except Exception as exc:
-    log(f"KenLM compile skipped: {exc}")
+# Optional KenLM — soft-fail; training does not need it.
+log("Compiling KenLM (optional; greedy CTC if this fails)…")
+run(
+    [
+        sys.executable,
+        "-c",
+        (
+            "from src.decoding.kenlm_utils import compile_kenlm; "
+            "p=compile_kenlm('kenlm', strict=False); "
+            "print('KenLM OK' if p[0] else 'KenLM skipped (no boost libs) — training continues')"
+        ),
+    ],
+    check=False,
+)
 
 # ---------------------------------------------------------------------------
 # 4) Prefetch external corpora
