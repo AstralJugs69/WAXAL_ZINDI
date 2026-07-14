@@ -818,44 +818,41 @@ def worker_inference(
 
 def _load_test_audio_dict(test_ids):
     """
-    Load HF test splits and cache audio keyed only by canonical example IDs.
+    Stream HF **test** splits only and cache audio keyed by canonical example IDs.
 
-    Prefer non-streaming load (full ID coverage); fall back to streaming if RAM fails.
+    IMPORTANT: Do NOT use map-style (streaming=False) for WaxalNLP here.
+    Non-streaming load_dataset(split="test") still downloads the whole config
+    (train + unlabeled parquets, tens of GB). Streaming only pulls test shards
+    and reuses HF hub/datasets cache when HF_HOME is set correctly.
     """
     import datasets
+
+    hf_home = os.environ.get("HF_HOME") or configure_hf_cache()
+    logger.info(f"HF_HOME={hf_home}")
+    logger.info(f"HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')}")
+    logger.info(f"HF_DATASETS_CACHE={os.environ.get('HF_DATASETS_CACHE')}")
 
     expected = set(str(i).strip() for i in test_ids)
     audio_dict = {}
 
     for lang in ["lin", "sna", "lug"]:
-        logger.info(f"Loading and caching test split from HF Hub for {lang}...")
-        lang_ds = None
-        # Non-streaming is more reliable for full coverage; streaming as fallback.
-        for streaming in (False, True):
-            try:
-                lang_ds = datasets.load_dataset(
-                    "google/WaxalNLP",
-                    name=f"{lang}_asr",
-                    split="test",
-                    streaming=streaming,
-                )
-                lang_ds = lang_ds.cast_column("audio", datasets.Audio(sampling_rate=16000))
-                mode = "streaming" if streaming else "map-style"
-                logger.info(f"  {lang}: loaded test split ({mode})")
-                break
-            except Exception as e:
-                logger.warning(f"  {lang}: load failed (streaming={streaming}): {e}")
-                lang_ds = None
-        if lang_ds is None:
-            logger.warning(f"Failed to cache test split for {lang}")
+        logger.info(f"Streaming test split for {lang} (cache-friendly, no full dump)...")
+        try:
+            lang_ds = datasets.load_dataset(
+                "google/WaxalNLP",
+                name=f"{lang}_asr",
+                split="test",
+                streaming=True,  # never download unlabeled/train for submission
+            )
+            lang_ds = lang_ds.cast_column("audio", datasets.Audio(sampling_rate=16000))
+        except Exception as e:
+            logger.warning(f"Failed to open streaming test split for {lang}: {e}")
             continue
 
         count = 0
         try:
-            iterator = lang_ds if hasattr(lang_ds, "__iter__") else iter(lang_ds)
-            for ex in iterator:
+            for ex in lang_ds:
                 if not isinstance(ex, dict):
-                    # datasets row object
                     try:
                         ex = dict(ex)
                     except Exception:
@@ -864,7 +861,6 @@ def _load_test_audio_dict(test_ids):
                 if not ex_id:
                     continue
                 ex_id = str(ex_id).strip()
-                # Keep any expected ID; also keep lang-prefixed IDs that match this split
                 if ex_id not in expected and not ex_id.startswith(f"{lang}_"):
                     continue
                 audio = ex.get("audio") or {}
@@ -884,7 +880,7 @@ def _load_test_audio_dict(test_ids):
     still_missing = sorted(i for i in expected if i not in audio_dict)
     if still_missing:
         logger.warning(
-            f"{len(still_missing)} expected Test IDs have no audio after HF load. "
+            f"{len(still_missing)} expected Test IDs have no audio after HF stream. "
             f"First few: {still_missing[:10]}"
         )
     else:
