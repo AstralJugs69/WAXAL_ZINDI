@@ -249,6 +249,10 @@ def cmd_download(args):
     ]
     if args.list_only:
         cmd.append("--list-only")
+    if getattr(args, "force_per_file", False):
+        cmd.append("--force-per-file")
+    if getattr(args, "langs", None):
+        cmd.extend(["--langs", args.langs])
     run(cmd, check=False)
 
 
@@ -324,6 +328,16 @@ def main():
     )
     p_dl.add_argument("--download-dir", default="./ckpt_dl")
     p_dl.add_argument("--list-only", action="store_true")
+    p_dl.add_argument(
+        "--force-per-file",
+        action="store_true",
+        help="Skip bulk download; always use per-file mode (needed when bulk 404s)",
+    )
+    p_dl.add_argument(
+        "--langs",
+        default="lin,sna,lug",
+        help="Comma-separated languages to restore (e.g. sna only after partial restore)",
+    )
     p_dl.set_defaults(func=cmd_download)
 
     p_sub = sub.add_parser("submit", help="Generate submission.csv")

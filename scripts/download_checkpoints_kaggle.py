@@ -79,98 +79,311 @@ def get_api():
     return api
 
 
-def list_all_files(api, dataset_id: str) -> list[str]:
+def _extract_file_name(f) -> str | None:
+    if f is None:
+        return None
+    if isinstance(f, str):
+        return f.strip() or None
+    if isinstance(f, dict):
+        n = f.get("name") or f.get("ref") or f.get("path")
+        return str(n).strip() if n else None
+    n = getattr(f, "name", None) or getattr(f, "ref", None)
+    return str(n).strip() if n else None
+
+
+def _extract_next_page_token(resp) -> str | None:
+    if resp is None:
+        return None
+    if isinstance(resp, dict):
+        tok = (
+            resp.get("nextPageToken")
+            or resp.get("next_page_token")
+            or resp.get("nextPage")
+        )
+        return str(tok).strip() if tok else None
+    tok = (
+        getattr(resp, "next_page_token", None)
+        or getattr(resp, "nextPageToken", None)
+        or getattr(resp, "next_page", None)
+    )
+    return str(tok).strip() if tok else None
+
+
+def list_all_files_via_api(api, dataset_id: str) -> list[str]:
     """
-    Paginate through every file in the dataset.
-    Returns list of remote relative paths.
+    Try Python KaggleApi methods. Signatures differ across kaggle-api versions.
     """
     names: list[str] = []
     owner, slug = dataset_id.split("/", 1)
 
-    # --- Preferred: underlying API with page_token (full list) ---
-    try:
-        page_token = None
-        page = 0
-        while True:
-            page += 1
-            kwargs = {"page_size": 100}
-            if page_token:
-                kwargs["page_token"] = page_token
-            # Method signatures differ across kaggle-api versions
-            try:
-                resp = api.datasets_list_files(owner, slug, **kwargs)
-            except TypeError:
-                try:
-                    resp = api.dataset_list_files(dataset_id)
-                except Exception:
-                    resp = None
-                if resp is not None:
-                    file_list = getattr(resp, "files", resp) or []
-                    for f in file_list:
-                        n = getattr(f, "name", None) or str(f)
-                        if n and n not in names:
-                            names.append(n)
-                break
+    # Candidate callables + kwargs styles across kaggle-api versions
+    candidates = []
+    for method_name in (
+        "dataset_list_files",
+        "datasets_list_files",
+        "dataset_list_files_with_http_info",
+    ):
+        meth = getattr(api, method_name, None)
+        if callable(meth):
+            candidates.append((method_name, meth))
 
-            if resp is None:
-                break
-            file_list = getattr(resp, "files", None) or getattr(resp, "dataset_files", None) or []
-            # resp may be a list
-            if isinstance(resp, list):
-                file_list = resp
-            for f in file_list:
-                n = getattr(f, "name", None) or (f.get("name") if isinstance(f, dict) else str(f))
-                if n and n not in names:
-                    names.append(n)
-            page_token = (
-                getattr(resp, "next_page_token", None)
-                or getattr(resp, "nextPageToken", None)
-                or (resp.get("nextPageToken") if isinstance(resp, dict) else None)
+    # Also try nested client used by newer kaggle packages
+    for attr in ("datasets_list_files", "dataset_list_files"):
+        for obj_name in ("dataset_api_client", "datasets_api", "api_client"):
+            obj = getattr(api, obj_name, None)
+            if obj is None:
+                continue
+            meth = getattr(obj, attr, None)
+            if callable(meth):
+                candidates.append((f"{obj_name}.{attr}", meth))
+
+    if not candidates:
+        log("API pagination note: no dataset list-files method on this KaggleApi build")
+        return names
+
+    for method_name, meth in candidates:
+        try:
+            page_token = None
+            page = 0
+            local: list[str] = []
+            while True:
+                page += 1
+                # Try common call signatures
+                resp = None
+                last_err = None
+                call_styles = [
+                    lambda pt=page_token: meth(
+                        owner, slug, page_size=200, page_token=pt
+                    ),
+                    lambda pt=page_token: meth(
+                        dataset_id, page_size=200, page_token=pt
+                    ),
+                    lambda pt=page_token: meth(
+                        owner_slug=owner,
+                        dataset_slug=slug,
+                        page_size=200,
+                        page_token=pt,
+                    ),
+                    lambda pt=page_token: meth(dataset_id) if pt is None else None,
+                    lambda pt=page_token: meth(owner, slug) if pt is None else None,
+                ]
+                for style in call_styles:
+                    try:
+                        maybe = style()
+                        if maybe is not None:
+                            resp = maybe
+                            break
+                    except TypeError as e:
+                        last_err = e
+                        continue
+                    except Exception as e:
+                        last_err = e
+                        continue
+
+                if resp is None:
+                    if last_err:
+                        log(f"  API {method_name} failed: {last_err}")
+                    break
+
+                # Unwrap (data, status, headers) http_info tuples
+                if isinstance(resp, tuple) and resp:
+                    resp = resp[0]
+
+                file_list = (
+                    getattr(resp, "files", None)
+                    or getattr(resp, "dataset_files", None)
+                    or (resp if isinstance(resp, list) else None)
+                    or (resp.get("files") if isinstance(resp, dict) else None)
+                    or []
+                )
+                before = len(local)
+                for f in file_list:
+                    n = _extract_file_name(f)
+                    if n and n not in local:
+                        local.append(n)
+                added = len(local) - before
+                page_token = _extract_next_page_token(resp)
+                log(
+                    f"  API {method_name} page {page}: +{added} "
+                    f"(total {len(local)}) token={'yes' if page_token else 'no'}"
+                )
+                if not page_token or added == 0:
+                    break
+                if page > 200:
+                    log("WARNING: stopped API pagination at 200 pages")
+                    break
+                time.sleep(0.15)
+
+            if local:
+                names = local
+                log(f"API list via {method_name}: {len(names)} files")
+                return names
+        except Exception as exc:
+            log(f"API pagination note ({method_name}): {exc}")
+            continue
+
+    return names
+
+
+def list_all_files_via_cli(dataset_id: str) -> list[str]:
+    """
+    Paginate with:
+      python -m kaggle datasets files DATASET -v --csv --page-size 200
+      [--page-token TOKEN]
+
+    Default page size is 20 — without pagination sna (and later files) are missed.
+    """
+    cmd = kaggle_cmd()
+    names: list[str] = []
+    page_token: str | None = None
+    page = 0
+    seen_tokens: set[str] = set()
+
+    while True:
+        page += 1
+        c = cmd + [
+            "datasets",
+            "files",
+            dataset_id,
+            "-v",
+            "--csv",
+            "--page-size",
+            "200",
+        ]
+        if page_token:
+            c += ["--page-token", page_token]
+
+        r = run_capture(c)
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        combined = out + "\n" + err
+
+        if r.returncode != 0 and not out:
+            log(f"CLI files list failed (rc={r.returncode}): {err[:300]}")
+            break
+
+        new_token = None
+        for line in combined.splitlines():
+            # Formats seen:
+            #   Next Page Token = AbCdEf...
+            #   Next Page Token=AbCdEf...
+            #   "nextPageToken": "..."
+            low = line.lower()
+            if "next page token" in low:
+                if "=" in line:
+                    new_token = line.split("=", 1)[-1].strip().strip('"').strip("'")
+                elif ":" in line:
+                    new_token = line.split(":", 1)[-1].strip().strip('"').strip("'")
+            elif "nextpagetoken" in low.replace(" ", ""):
+                # json-ish
+                for sep in (":", "="):
+                    if sep in line:
+                        cand = line.split(sep, 1)[-1].strip().strip(",").strip('"').strip("'")
+                        if cand and cand.lower() not in ("null", "none", ""):
+                            new_token = cand
+                            break
+
+        before = len(names)
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower().startswith("name") and "," in line:
+                # CSV header
+                continue
+            if "next page token" in line.lower():
+                continue
+            # CSV: name,size,creationDate,...
+            name = line.split(",")[0].strip().strip('"')
+            if not name or name.lower() in ("name", "ref"):
+                continue
+            if name not in names:
+                names.append(name)
+
+        added = len(names) - before
+        log(
+            f"  CLI page {page}: +{added} files (total {len(names)}) "
+            f"token={'yes' if new_token else 'no'}"
+        )
+
+        if not new_token or new_token in seen_tokens:
+            break
+        if added == 0 and page > 1:
+            # token present but nothing new — stop
+            break
+        seen_tokens.add(new_token)
+        page_token = new_token
+        if page > 200:
+            log("WARNING: stopped CLI pagination at 200 pages")
+            break
+        time.sleep(0.2)
+
+    return names
+
+
+def list_all_files(api, dataset_id: str) -> list[str]:
+    """
+    Paginate through every file in the dataset.
+    Returns list of remote relative paths.
+
+    IMPORTANT: default CLI page size is 20. Without --page-size 200 + page tokens,
+    only the first page is seen (lin/lug only; sna missing).
+    """
+    names = list_all_files_via_api(api, dataset_id)
+
+    # Always prefer CLI if API list looks incomplete (e.g. missing sna)
+    has_all_langs = all(
+        any(n.startswith(f"{lang}_") or f"/{lang}_" in n for n in names)
+        for lang in ("lin", "sna", "lug")
+    )
+    if len(names) < 5 or not has_all_langs:
+        if names:
+            log(
+                f"API listed {len(names)} files but languages incomplete "
+                f"(need lin/sna/lug) — using CLI pagination"
             )
-            log(f"  list page {page}: +{len(file_list)} files (total {len(names)})")
-            if not page_token:
-                break
-            if page > 200:
-                log("WARNING: stopped API pagination at 200 pages")
-                break
-            time.sleep(0.15)
-    except Exception as exc:
-        log(f"API pagination note: {exc}")
+        else:
+            log("Using CLI pagination for full file list…")
+        cli_names = list_all_files_via_cli(dataset_id)
+        # Merge, prefer CLI order if longer
+        if len(cli_names) >= len(names):
+            names = cli_names
+        else:
+            for n in cli_names:
+                if n not in names:
+                    names.append(n)
 
-    # --- CLI fallback with next-page token parsing ---
-    if len(names) < 5:
-        cmd = kaggle_cmd()
-        page_token = None
-        page = 0
-        while True:
-            page += 1
-            c = cmd + ["datasets", "files", dataset_id, "-v", "--csv"]
-            r = run_capture(c)
-            out = r.stdout or ""
-            err = r.stderr or ""
-            new_token = None
-            for line in (out + "\n" + err).splitlines():
-                if "Next Page Token" in line and "=" in line:
-                    new_token = line.split("=", 1)[-1].strip()
-            for line in out.splitlines():
-                line = line.strip()
-                if not line or line.lower().startswith("name") or "Next Page Token" in line:
-                    continue
-                name = line.split(",")[0].strip().strip('"')
-                if name and name not in names:
-                    names.append(name)
-            # Many CLI builds ignore page token; avoid infinite loop
-            if not new_token or new_token == page_token or page >= 1:
-                break
-            page_token = new_token
+    # Deduplicate while preserving order
+    seen = set()
+    uniq = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            uniq.append(n)
+    names = uniq
 
     log(f"Collected {len(names)} remote file path(s)")
+    langs_present = {
+        lang
+        for lang in ("lin", "sna", "lug")
+        if any(n.startswith(f"{lang}_") or f"/{lang}_" in n or n.startswith(f"{lang}/") for n in names)
+    }
+    log(f"Languages in file list: {sorted(langs_present) or '(none detected)'}")
+    if "sna" not in langs_present:
+        log("WARNING: sna paths not in list — pagination may still be incomplete")
+
     if names:
         log("Sample paths:")
         for n in names[:8]:
             log(f"  {n}")
         if len(names) > 8:
             log(f"  ... +{len(names) - 8} more")
+        # Show a sna sample if present
+        sna_samples = [n for n in names if "sna" in n.lower()][:3]
+        if sna_samples:
+            log("Sna sample paths:")
+            for n in sna_samples:
+                log(f"  {n}")
     return names
 
 
@@ -267,10 +480,17 @@ def download_per_file(api, dataset_id: str, names: list[str], dest: Path) -> int
     cmd = kaggle_cmd()
     dest.mkdir(parents=True, exist_ok=True)
     ok = 0
+    skipped = 0
     total = len(names)
     log(f"Per-file download of {total} files (fallback because bulk 404)…")
     for i, name in enumerate(names, 1):
-        # Skip huge lightning logs noise optional? keep all for completeness
+        target = dest / name
+        # Skip if already present with non-trivial size (re-run friendly)
+        if target.is_file() and target.stat().st_size > 64:
+            log(f"[{i}/{total}] SKIP (exists): {name}")
+            ok += 1
+            skipped += 1
+            continue
         log(f"[{i}/{total}] {name}")
         success = download_file_api(api, dataset_id, name, dest)
         if not success:
@@ -282,7 +502,7 @@ def download_per_file(api, dataset_id: str, names: list[str], dest: Path) -> int
             log(f"  FAILED: {name}")
         if i % 10 == 0:
             time.sleep(0.5)
-    log(f"Per-file download: {ok}/{total} succeeded")
+    log(f"Per-file download: {ok}/{total} succeeded ({skipped} already present)")
     return ok
 
 
@@ -352,7 +572,18 @@ def main():
         action="store_true",
         help="Skip bulk download; always use per-file mode",
     )
+    ap.add_argument(
+        "--langs",
+        default="lin,sna,lug",
+        help="Comma-separated languages to restore (default: lin,sna,lug). "
+        "Use --langs sna to only fetch Shona after a partial restore.",
+    )
     args = ap.parse_args()
+
+    want_langs = {x.strip().lower() for x in args.langs.split(",") if x.strip()}
+    want_langs &= {"lin", "sna", "lug"}
+    if not want_langs:
+        raise SystemExit("--langs must include at least one of: lin, sna, lug")
 
     setup_kaggle_json()
     user = json.loads((Path.home() / ".kaggle" / "kaggle.json").read_text())["username"]
@@ -362,6 +593,7 @@ def main():
 
     log(f"Kaggle user from kaggle.json: {user}")
     log(f"Dataset: {dataset_id}")
+    log(f"Languages requested: {sorted(want_langs)}")
     log("")
     log("NOTE: `kaggle datasets list -m` size=0 is often a LIE. Web UI / files list are truth.")
     log("")
@@ -370,6 +602,28 @@ def main():
     names = list_all_files(api, dataset_id)
     if args.list_only:
         return
+
+    # Filter to requested languages (paths like sna_mms-300m_fold0/...)
+    if names:
+        filtered = []
+        for n in names:
+            for lang in want_langs:
+                if (
+                    n.startswith(f"{lang}_")
+                    or f"/{lang}_" in n
+                    or n.startswith(f"{lang}/")
+                    or f"/{lang}/" in n
+                ):
+                    filtered.append(n)
+                    break
+        if filtered:
+            log(f"Filtered to {len(filtered)}/{len(names)} files for langs={sorted(want_langs)}")
+            names = filtered
+        else:
+            log(
+                f"WARNING: no paths matched langs={sorted(want_langs)}; "
+                "downloading full list instead"
+            )
 
     if not names:
         log("WARNING: file list empty from API — will still try bulk download")
@@ -390,6 +644,7 @@ def main():
             raise SystemExit("All per-file downloads failed.")
 
     found = find_lang_dirs(dl)
+    found = {k: v for k, v in found.items() if k in want_langs}
     if not found:
         log("Could not locate language folders. First 60 paths under download dir:")
         for p in sorted(dl.rglob("*"))[:60]:
@@ -406,8 +661,17 @@ def main():
     log(f"  outputs = {outputs}")
     for lang in ("lin", "sna", "lug"):
         d = outputs / f"{lang}_mms-300m_fold0"
-        log(f"  {lang}: {d.exists()}")
-    log("Next: python generate_submission.py --max-blank-frac 0.05 --hf_token '…'")
+        mark = d.exists()
+        if lang not in want_langs:
+            log(f"  {lang}: {mark} (not requested this run)")
+        else:
+            log(f"  {lang}: {mark}")
+    missing = [L for L in want_langs if not (outputs / f"{L}_mms-300m_fold0").exists()]
+    if missing:
+        log(f"WARNING: still missing after restore: {missing}")
+        log("  Re-run with --list-only to inspect file list, or re-upload from train VM.")
+    else:
+        log("Next: python generate_submission.py --max-blank-frac 0.05 --hf_token '…'")
     log("=" * 64)
 
 
