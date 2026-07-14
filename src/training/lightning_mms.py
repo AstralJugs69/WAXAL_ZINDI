@@ -619,26 +619,79 @@ def train(args):
         deterministic=False,
     )
 
-    # Resume from last/best Lightning ckpt if requested
+    # Resume from the *furthest* checkpoint — NOT blindly last.ckpt.
+    # last.ckpt is often mid-epoch or from a short re-run and can sit *behind*
+    # mms-epoch=04-val_loss=... files, which makes the bar jump back to Epoch 1/N.
     ckpt_path = getattr(args, "ckpt_path", None) or None
     if getattr(args, "resume", False) and not ckpt_path:
+        import re
+
         ckpt_dir = os.path.join(output_dir, "checkpoints")
-        candidates = []
+        best_path = None
+        best_key = (-1, -1.0, 0.0)  # (epoch, -val_loss, mtime) — prefer high epoch, then low val_loss
+
         if os.path.isdir(ckpt_dir):
-            candidates = [
-                os.path.join(ckpt_dir, f)
-                for f in os.listdir(ckpt_dir)
-                if f.endswith(".ckpt")
-            ]
-        last = os.path.join(ckpt_dir, "last.ckpt")
-        if os.path.exists(last):
-            ckpt_path = last
-        elif candidates:
-            # newest mtime
-            candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-            ckpt_path = candidates[0]
+            for fname in os.listdir(ckpt_dir):
+                if not fname.endswith(".ckpt"):
+                    continue
+                path = os.path.join(ckpt_dir, fname)
+                epoch = -1
+                val_loss = float("inf")
+                m = re.search(r"epoch[=_](\d+)", fname, re.I)
+                if m:
+                    epoch = int(m.group(1))
+                m2 = re.search(r"val_loss[=_]([0-9.]+)", fname, re.I)
+                if m2:
+                    try:
+                        val_loss = float(m2.group(1))
+                    except ValueError:
+                        pass
+                # last.ckpt / last-v1.ckpt: peek Lightning metadata for real epoch
+                if epoch < 0 and fname.startswith("last"):
+                    try:
+                        try:
+                            blob = torch.load(path, map_location="cpu", weights_only=False)
+                        except TypeError:
+                            blob = torch.load(path, map_location="cpu")
+                        if isinstance(blob, dict):
+                            epoch = int(blob.get("epoch", -1))
+                            # loops may store more accurate counters
+                            for key in ("epoch",):
+                                if key in blob and blob[key] is not None:
+                                    epoch = max(epoch, int(blob[key]))
+                            loops = blob.get("loops") or {}
+                            fit = loops.get("fit_loop") if isinstance(loops, dict) else None
+                            if isinstance(fit, dict):
+                                # Lightning 2.x: epoch_progress.current.completed
+                                try:
+                                    ep = (
+                                        fit.get("epoch_progress", {})
+                                        .get("current", {})
+                                        .get("completed")
+                                    )
+                                    if ep is not None:
+                                        epoch = max(epoch, int(ep))
+                                except Exception:
+                                    pass
+                    except Exception as exc:
+                        logger.warning(f"Could not read epoch from {fname}: {exc}")
+                        epoch = -1
+                mtime = os.path.getmtime(path)
+                # Rank: higher epoch first; for same epoch prefer lower val_loss; else newer mtime
+                key = (epoch, -val_loss if val_loss < float("inf") else 0.0, mtime)
+                if key > best_key:
+                    best_key = key
+                    best_path = path
+                    logger.info(
+                        f"  resume candidate: {fname} (epoch≈{epoch}, val_loss={val_loss if val_loss < float('inf') else 'n/a'})"
+                    )
+
+        ckpt_path = best_path
         if ckpt_path:
-            logger.info(f"Resuming from checkpoint: {ckpt_path}")
+            logger.info(
+                f"Resuming from furthest checkpoint: {ckpt_path} "
+                f"(epoch≈{best_key[0]})"
+            )
         else:
             logger.warning(f" --resume set but no .ckpt under {ckpt_dir}; training from scratch.")
 

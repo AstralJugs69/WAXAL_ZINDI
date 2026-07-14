@@ -201,6 +201,8 @@ def cmd_train(args):
         ]
         if args.resume:
             cmd.append("--resume")
+        if getattr(args, "ckpt_path", None):
+            cmd.extend(["--ckpt_path", args.ckpt_path])
         log(f"\n===== TRAIN {lang} epochs={epochs} batch={args.batch_size} lr={args.lr} =====")
         run(cmd, check=False)
 
@@ -303,6 +305,13 @@ def main():
     p_train.add_argument("--fold", type=int, default=0)
     p_train.add_argument("--devices", type=int, default=1)
     p_train.add_argument("--resume", action="store_true")
+    p_train.add_argument(
+        "--ckpt-path",
+        dest="ckpt_path",
+        type=str,
+        default=None,
+        help="Explicit Lightning .ckpt (overrides auto-pick of furthest epoch)",
+    )
     p_train.add_argument("--config", type=str, default="config/base_mms_lightning_96gb.yaml")
     p_train.set_defaults(func=cmd_train)
 
