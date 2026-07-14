@@ -66,27 +66,43 @@ def get_audio_data(audio_info):
 
 def normalize_text(text):
     """
-    Standardizes punctuation, converts to lowercase, applies NFKC unicode normalization,
-    and strips special symbols keeping only letters and spaces.
+    ASR text normalization aligned with common Zindi/WAXAL eval practice:
+      - NFKC + lowercase
+      - keep unicode letters, digits, whitespace
+      - keep apostrophe (') — critical for Luganda (g'ennyanja, eby'enjawulo)
+      - strip other punctuation
+      - collapse whitespace
+
+    Older versions stripped apostrophes entirely, which merged word pieces and
+    inflated CER/WER vs references that retain them (or vs scorers that keep ').
     """
     if not text or not isinstance(text, str):
         return ""
-    
+
     # 1. NFKC Unicode Normalization
     text = unicodedata.normalize("NFKC", text)
-    
-    # 2. Lowercase conversion
+
+    # 2. Lowercase
     text = text.lower()
-    
-    # 3. Clean spacing
-    text = re.sub(r"\s+", " ", text)
-    
-    # 4. Strip punctuation and special symbols (keeping unicode letters and whitespace)
-    # [^\w\s] removes punctuation but keeps letters in low-resource orthographies
-    text = re.sub(r"[^\w\s]", "", text, flags=re.UNICODE)
-    
-    # 5. Remove digits if transcriptions shouldn't have them, or keep them if they are read speech numbers.
-    # For ASR challenge, standard is keeping letters and spacing
+
+    # 3. Normalize quote-like chars to ASCII apostrophe (Luganda clitics)
+    text = text.replace("\u2019", "'").replace("\u2018", "'").replace("`", "'")
+    text = text.replace("\u02bc", "'").replace("\u00b4", "'")
+
+    # 4. Drop control chars
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+
+    # 5. Keep letters / digits / whitespace / apostrophe only
+    #    \w is unicode-aware with re.UNICODE (letters from African orthographies stay)
+    text = re.sub(r"[^\w\s']", " ", text, flags=re.UNICODE)
+    # drop bare underscores that \w keeps (not part of spoken orthography here)
+    text = text.replace("_", " ")
+
+    # 6. Collapse whitespace; strip dangling apostrophes used as quotes
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"'+", "'", text)
+    text = re.sub(r"\s'\s", " ", text)
+    text = text.strip(" '")
     text = re.sub(r"\s+", " ", text).strip()
     return text
 

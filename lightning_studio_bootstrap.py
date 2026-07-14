@@ -197,8 +197,10 @@ def cmd_train(args):
             "--lr",
             str(args.lr),
             "--unfreeze_feature_encoder",
-            "--no_early_stopping",
         ]
+        # Default: keep early stopping (config). Only disable if user asks.
+        if getattr(args, "no_early_stopping", False):
+            cmd.append("--no_early_stopping")
         if args.resume:
             cmd.append("--resume")
         if getattr(args, "ckpt_path", None):
@@ -299,12 +301,18 @@ def main():
     add_hf_token(p_train)
     p_train.add_argument("--lang", type=str, default=None, help="Single language lin|sna|lug")
     p_train.add_argument("--langs", type=str, default="lin,sna,lug")
-    p_train.add_argument("--epochs", type=int, default=8)
-    p_train.add_argument("--batch-size", type=int, default=16)
+    p_train.add_argument("--epochs", type=int, default=5)
+    p_train.add_argument("--batch-size", type=int, default=32)
     p_train.add_argument("--lr", type=float, default=3e-4)
     p_train.add_argument("--fold", type=int, default=0)
     p_train.add_argument("--devices", type=int, default=1)
     p_train.add_argument("--resume", action="store_true")
+    p_train.add_argument(
+        "--no-early-stopping",
+        dest="no_early_stopping",
+        action="store_true",
+        help="Disable early stopping (not recommended for fresh trains)",
+    )
     p_train.add_argument(
         "--ckpt-path",
         dest="ckpt_path",

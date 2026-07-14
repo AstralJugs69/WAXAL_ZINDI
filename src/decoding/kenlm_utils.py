@@ -182,7 +182,7 @@ def train_kenlm_model(text_path, arpa_path, binary_path, kenlm_dir="kenlm"):
     return binary_path
 
 
-def build_language_model(transcripts, output_dir, kenlm_dir="kenlm", order=5):
+def build_language_model(transcripts, output_dir, kenlm_dir="kenlm", order=5, force=False):
     """
     High-level helper: builds a KenLM n-gram LM binary from a list of transcript
     strings extracted from the training set.
@@ -190,7 +190,7 @@ def build_language_model(transcripts, output_dir, kenlm_dir="kenlm", order=5):
     Workflow:
         transcripts → lm_corpus.txt → lmplz → lm.arpa → build_binary → lm.bin
 
-    Skips re-compilation if lm.bin already exists (safe across training restarts).
+    Skips re-compilation if lm.bin already exists unless force=True.
 
     Parameters
     ----------
@@ -198,6 +198,7 @@ def build_language_model(transcripts, output_dir, kenlm_dir="kenlm", order=5):
     output_dir  : str        — directory where lm_corpus.txt, lm.arpa, lm.bin are written
     kenlm_dir   : str        — path to the compiled KenLM source tree
     order       : int        — n-gram order (default 5)
+    force       : bool       — rebuild even if lm.bin exists
 
     Returns
     -------
@@ -209,9 +210,14 @@ def build_language_model(transcripts, output_dir, kenlm_dir="kenlm", order=5):
     arpa_path   = os.path.join(output_dir, "lm.arpa")
     binary_path = os.path.join(output_dir, "lm.bin")
 
-    if os.path.exists(binary_path):
+    if os.path.exists(binary_path) and not force:
         logger.info(f"LM binary already exists at {binary_path}. Skipping rebuild.")
         return binary_path
+    if force and os.path.exists(binary_path):
+        try:
+            os.remove(binary_path)
+        except OSError:
+            pass
 
     lmplz_path, build_binary_path = compile_kenlm(kenlm_dir, strict=False)
     if not lmplz_path or not build_binary_path:

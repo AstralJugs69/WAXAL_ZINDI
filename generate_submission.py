@@ -626,18 +626,36 @@ def worker_inference(
                 processor.tokenizer.set_target_lang(lang)
             except Exception:
                 pass
+            # Inference: never apply SpecAug
+            if hasattr(model, "config"):
+                model.config.apply_spec_augment = False
             model_families[lang] = "mms"
             worker_logger.info(f"[Worker {worker_id}] Loaded fine-tuned MMS for {lang} from {custom_mms_dir}")
 
+            # Always prefer pyctcdecode beam; attach KenLM when lm.bin is present
             lm_path = os.path.join(custom_mms_dir, "lm.bin")
-            if os.path.exists(lm_path):
-                try:
-                    vocab = processor.tokenizer.get_vocab()
-                    decoders[lang] = create_ctc_decoder(vocab_dict=vocab, kenlm_model_path=lm_path)
-                except Exception as exc:
-                    worker_logger.warning(f"[Worker {worker_id}] KenLM load failed for {lang}: {exc}")
-                    decoders[lang] = None
-            else:
+            if not os.path.exists(lm_path):
+                lm_path = None
+                worker_logger.warning(
+                    f"[Worker {worker_id}] No lm.bin for {lang} — beam without LM "
+                    f"(still better than greedy). Build LM with scripts/export_best_build_lm.py"
+                )
+            try:
+                vocab = processor.tokenizer.get_vocab()
+                decoders[lang] = create_ctc_decoder(
+                    vocab_dict=vocab,
+                    kenlm_model_path=lm_path,
+                    alpha=0.5,
+                    beta=1.5,
+                )
+                worker_logger.info(
+                    f"[Worker {worker_id}] CTC beam decoder ready for {lang} "
+                    f"(LM={'yes' if lm_path else 'no'})"
+                )
+            except Exception as exc:
+                worker_logger.warning(
+                    f"[Worker {worker_id}] Beam decoder failed for {lang}: {exc}; greedy fallback"
+                )
                 decoders[lang] = None
         elif use_gemma:
             model, processor = _load_gemma_model_and_processor(
@@ -797,10 +815,14 @@ def worker_inference(
                         logits = model(**inputs).logits[0].cpu().numpy()
                         
                     if decoder is not None:
+                        # Beam search (± KenLM) — primary path for lower WER
                         chunk_text = decode_logits(decoder, logits, beam_width=128)
                     else:
+                        # Last-resort greedy
                         pred_ids = np.argmax(logits, axis=-1)
-                        chunk_text = processor.tokenizer.decode(pred_ids, skip_special_tokens=True)
+                        chunk_text = processor.tokenizer.decode(
+                            pred_ids, skip_special_tokens=True
+                        )
                         
                 normalized_chunk = normalize_text(chunk_text)
                 if normalized_chunk:
@@ -970,6 +992,9 @@ def _ensure_best_models_from_checkpoints(target_languages):
     """
     If best_model/ is missing but Lightning .ckpt exists, export HF weights so
     generate_submission uses the fine-tune instead of base mms-1b-all.
+
+    Uses same architecture as training: mms-300m backbone + mms-1b-all vocab size.
+    Prefer scripts/export_best_build_lm.py --force for a full re-export + KenLM.
     """
     import torch
     from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
@@ -977,13 +1002,14 @@ def _ensure_best_models_from_checkpoints(target_languages):
     for lang in target_languages:
         out = Path(get_outputs_dir()) / f"{lang}_mms-300m_fold0"
         best = out / "best_model"
-        if best.is_dir() and (best / "config.json").exists():
+        if best.is_dir() and (
+            (best / "model.safetensors").exists() or (best / "pytorch_model.bin").exists()
+        ):
             continue
         ckpt_dir = out / "checkpoints"
         if not ckpt_dir.is_dir():
             logger.warning(f"No best_model and no checkpoints for {lang} under {out}")
             continue
-        # Prefer lowest val_loss epoch ckpt, then last.ckpt, then newest
         scored = []
         for p in ckpt_dir.glob("*.ckpt"):
             name = p.name
@@ -995,9 +1021,9 @@ def _ensure_best_models_from_checkpoints(target_languages):
                 except ValueError:
                     pass
             if name.startswith("last"):
-                scored.append((1, 0.0, p))
+                scored.append((1, 999.0, p))
             else:
-                scored.append((2, -p.stat().st_mtime, p))
+                scored.append((2, 999.0, p))
         if not scored:
             logger.warning(f"No .ckpt files for {lang}")
             continue
@@ -1005,36 +1031,37 @@ def _ensure_best_models_from_checkpoints(target_languages):
         ckpt_path = scored[0][2]
         logger.info(f"Exporting {lang} best_model from {ckpt_path} …")
         try:
-            # weights_only=False required for Lightning checkpoints on torch>=2.6
             try:
                 blob = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
             except TypeError:
                 blob = torch.load(str(ckpt_path), map_location="cpu")
             state = blob.get("state_dict", blob) if isinstance(blob, dict) else blob
-            # Strip Lightning prefix model.
             cleaned = {}
             for k, v in state.items():
-                nk = k
-                if nk.startswith("model."):
-                    nk = nk[len("model.") :]
+                nk = k[6:] if isinstance(k, str) and k.startswith("model.") else k
                 cleaned[nk] = v
-            # Need a base architecture; processor from facebook/mms-300m or fine-tune config if present
-            base_id = "facebook/mms-300m"
-            processor = Wav2Vec2Processor.from_pretrained(base_id, target_lang=lang)
+            processor = Wav2Vec2Processor.from_pretrained(
+                "facebook/mms-1b-all", target_lang=lang
+            )
+            try:
+                processor.tokenizer.set_target_lang(lang)
+            except Exception:
+                pass
+            vocab_size = len(processor.tokenizer)
             model = Wav2Vec2ForCTC.from_pretrained(
-                base_id, target_lang=lang, ignore_mismatched_sizes=True
+                "facebook/mms-300m",
+                ignore_mismatched_sizes=True,
+                vocab_size=vocab_size,
             )
             missing, unexpected = model.load_state_dict(cleaned, strict=False)
             logger.info(
                 f"  load_state_dict {lang}: missing={len(missing)} unexpected={len(unexpected)}"
             )
+            if hasattr(model, "config"):
+                model.config.apply_spec_augment = False
             best.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(str(best))
             processor.save_pretrained(str(best))
-            try:
-                processor.tokenizer.set_target_lang(lang)
-            except Exception:
-                pass
             logger.info(f"  Wrote {best}")
         except Exception as exc:
             logger.warning(f"Failed to export best_model for {lang} from ckpt: {exc}")

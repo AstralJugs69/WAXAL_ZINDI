@@ -23,7 +23,14 @@ training:
   log_every_n_steps: 25
   val_check_interval: 1.0
   save_top_k: 1
-  max_audio_seconds: 12.0
+  max_audio_seconds: 20.0
+  min_audio_seconds: 0.5
+  # Dynamic pad even on Kaggle GPU (batch 1 → same as fixed for B=1)
+  fixed_length_pad: false
+  soft_truncate: true
+  specaugment: true
+  mask_time_prob: 0.05
+  mask_feature_prob: 0.05
   # Must stay 0 on 30GB RAM — workers fork and double dataset footprint.
   num_workers: 0
 

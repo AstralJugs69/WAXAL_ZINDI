@@ -1,4 +1,5 @@
 import logging
+import os
 import numpy as np
 import jiwer
 from pyctcdecode import build_ctcdecoder
@@ -8,32 +9,46 @@ logger = logging.getLogger(__name__)
 
 def create_ctc_decoder(vocab_dict, kenlm_model_path=None, alpha=0.5, beta=1.5):
     """
-    Creates a pyctcdecode CTC beam search decoder using vocabulary tokens and KenLM.
+    Creates a pyctcdecode CTC beam search decoder.
+
+    Works with or without KenLM:
+      - kenlm_model_path set → acoustic + n-gram LM (best WER)
+      - kenlm_model_path None → pure beam search (still better than greedy argmax)
+
+    Wav2Vec2 CTC blank is typically <pad>; word boundary is '|'.
     """
-    logger.info("Initializing pyctcdecode CTC decoder...")
-    
-    # Sort vocabulary dict by index to get token list
-    sorted_vocab = [k for k, v in sorted(vocab_dict.items(), key=lambda item: item[1])]
-    
-    # Wav2Vec2 uses "|" as word boundary (space). We replace it for pyctcdecode if needed,
-    # or pyctcdecode automatically maps standard symbols. Let's make sure it handles spaces.
-    # We replace any tokenizer-specific space symbols like " " or "|" to matching characters.
+    lm_note = kenlm_model_path if kenlm_model_path else "no-LM (beam only)"
+    logger.info(f"Initializing pyctcdecode CTC decoder ({lm_note})...")
+
+    # Sort vocabulary by index so labels[i] matches logits[..., i]
+    max_idx = max(vocab_dict.values())
+    inv = [""] * (max_idx + 1)
+    for tok, idx in vocab_dict.items():
+        inv[idx] = tok
+
     vocab_list = []
-    for char in sorted_vocab:
-        if char == "<pad>":
-            vocab_list.append("") # pyctcdecode expects blank token or empty string
-        elif char in ["|", " "]:
+    blank_set = False
+    for tok in inv:
+        if tok in ("<pad>",) or (tok == "" and not blank_set):
+            # CTC blank → empty string (only one blank slot)
+            vocab_list.append("")
+            blank_set = True
+        elif tok in ("|", " "):
             vocab_list.append(" ")
+        elif tok in ("<s>", "</s>", "<unk>"):
+            # non-emitting specials: use a rare placeholder char pyctcdecode will rarely pick
+            vocab_list.append("\u2047")  # double question mark, stripped later if needed
         else:
-            vocab_list.append(char)
-            
-    # Build decoding framework using KenLM
-    decoder = build_ctcdecoder(
-        labels=vocab_list,
-        kenlm_model_path=kenlm_model_path,
-        alpha=alpha,
-        beta=beta
-    )
+            vocab_list.append(tok if tok is not None else "")
+
+    kwargs = {"labels": vocab_list}
+    if kenlm_model_path and os.path.exists(str(kenlm_model_path)):
+        kwargs["kenlm_model_path"] = kenlm_model_path
+        kwargs["alpha"] = alpha
+        kwargs["beta"] = beta
+    # Without KenLM, build_ctcdecoder still does useful beam search
+
+    decoder = build_ctcdecoder(**kwargs)
     return decoder
 
 def decode_logits(decoder, logits, beam_width=128, hotwords=None, hotword_weight=10.0):

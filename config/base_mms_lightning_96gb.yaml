@@ -1,4 +1,5 @@
-# MMS-300M for Lightning AI single high-VRAM GPU (e.g. ~96GB) + ~125GB RAM.
+# MMS-300M for Lightning AI high-VRAM GPU (~96GB) + ~125GB RAM.
+# Fresh-train recipe: dynamic padding + soft truncate + SpecAug + early stop.
 # Do NOT use on Kaggle 30GB RAM — use base_mms_gpu.yaml there.
 model_id: "facebook/mms-300m"
 model_family: "mms"
@@ -8,16 +9,14 @@ languages:
   - "lug"
 
 training:
-  learning_rate: 1.0e-4
-  # RTXP 6000 ~96–102GB VRAM: batch 16 only used ~23GB — scale up hard.
-  # If OOM: drop to 40 then 32. Target ~60–80% VRAM.
-  per_device_train_batch_size: 48
-  per_device_eval_batch_size: 32
+  learning_rate: 3.0e-4
+  # Dynamic padding uses less waste than fixed 20s; can keep large batches.
+  # If OOM: drop to 24 then 16.
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 16
   gradient_accumulation_steps: 1
-  # Effective batch 48 — more audio per step on 96GB cards
-  # HARD CAP: never rely on 999-epoch UI artifact. Prefer max_steps + early stop.
-  num_train_epochs: 6
-  max_steps: 2500
+  num_train_epochs: 5
+  max_steps: -1
   precision: "16-mixed"
   gradient_clip_val: 1.0
   warmup_steps: 200
@@ -25,21 +24,36 @@ training:
   log_every_n_steps: 25
   val_check_interval: 0.5
   limit_val_batches: 0.5
-  save_top_k: 2
+  save_top_k: 3
   early_stopping: true
   early_stopping_patience: 3
-  early_stopping_min_delta: 0.01
-  max_audio_seconds: 20.0
-  # 125GB system RAM — keep GPU fed; workers × prefetch ≈ RAM for audio batches
+  early_stopping_min_delta: 0.005
+
+  # --- length-aware training (P1) ---
+  # Soft cap for very long clips; pad only to batch max (not fixed 20s silence).
+  max_audio_seconds: 30.0
+  min_audio_seconds: 0.5
+  fixed_length_pad: false
+  soft_truncate: true
+
+  # --- SpecAug + waveform augs (P2) ---
+  specaugment: true
+  mask_time_prob: 0.05
+  mask_time_length: 10
+  mask_feature_prob: 0.05
+  mask_feature_length: 10
+
+  # 125GB system RAM — feed the GPU
   num_workers: 16
   prefetch_factor: 6
   pin_memory: true
+  freeze_feature_encoder: false
 
 data:
   train_csv: "Train.csv"
   test_csv: "Test.csv"
   duration_min: 1.5
-  duration_max: 30.0
+  duration_max: 45.0
   wps_min: 1.0
   wps_max: 8.0
   k_folds: 5

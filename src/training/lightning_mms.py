@@ -1,11 +1,11 @@
 """
-Minimal PyTorch Lightning MMS-300M CTC trainer for Kaggle TPU.
+Minimal PyTorch Lightning MMS-300M CTC trainer for Kaggle TPU / Lightning GPU.
 
-Design goals (stability over cleverness):
-  - Let Lightning own TPU process management (NO manual xmp.spawn)
-  - Static audio shapes (pad/truncate to fixed max_samples)
-  - num_workers=0 on TPU
-  - No monkey-patches, no JIT warm-up hacks, no git hot-reload mid-train
+Design goals:
+  - Dynamic padding + attention_mask for GPU (length-aware CTC)
+  - Optional fixed-length collate for TPU static graphs
+  - Soft truncate / random crop for long audio (no silent pad-to-20s)
+  - SpecAug-style masking via HF wav2vec2 config + waveform augs
   - Speaker-independent GroupKFold validation
   - Optional external corpora (Common Voice / FLEURS)
 """
@@ -53,30 +53,92 @@ def get_outputs_dir() -> str:
     return str(path)
 
 
-class FixedLengthCTCCollator:
+class DynamicLengthCTCCollator:
     """
-    Pads / truncates every waveform to a fixed number of samples so XLA sees
-    a stable graph. Variable-length batching is a primary TPU failure mode.
+    Length-aware CTC collator for GPU training.
+
+    - Pad only to the **longest item in the batch** (not a fixed 20s)
+    - Always emit attention_mask so CTC ignores pad frames
+    - Soft truncate: if longer than max_samples, take a random crop (train)
+      or leading window (eval) instead of always clipping from t=0 only
+    - Waveform augs: speed, gain, noise, time-mask
+    - Optional fixed_length mode for TPU static shapes
     """
 
-    def __init__(self, processor, max_samples: int, sampling_rate: int = 16000, augment: bool = False):
+    def __init__(
+        self,
+        processor,
+        max_samples: int,
+        sampling_rate: int = 16000,
+        augment: bool = False,
+        fixed_length: bool = False,
+        soft_truncate: bool = True,
+        min_samples: int = 16000,
+    ):
         self.processor = processor
         self.max_samples = int(max_samples)
         self.sampling_rate = sampling_rate
         self.augment = augment
+        self.fixed_length = fixed_length
+        self.soft_truncate = soft_truncate
+        self.min_samples = int(min_samples)
 
     def _maybe_augment(self, y: np.ndarray) -> np.ndarray:
-        if not self.augment or random.random() > 0.5:
+        if not self.augment:
             return y
-        # Cheap speed perturbation only (pitch is too slow for TPU host CPU)
-        factor = random.uniform(0.9, 1.1)
-        if abs(factor - 1.0) < 1e-3 or len(y) == 0:
+        y = np.asarray(y, dtype=np.float32).reshape(-1)
+        if y.size == 0:
             return y
-        indices = np.arange(0, len(y), factor)
-        indices = indices[indices < len(y)].astype(np.float64)
-        return np.interp(indices, np.arange(len(y)), y).astype(np.float32)
 
-    def _fix_audio(self, y: np.ndarray) -> np.ndarray:
+        # Speed perturbation
+        if random.random() < 0.5:
+            factor = random.uniform(0.9, 1.1)
+            if abs(factor - 1.0) >= 1e-3:
+                indices = np.arange(0, len(y), factor)
+                indices = indices[indices < len(y)].astype(np.float64)
+                if indices.size > 0:
+                    y = np.interp(indices, np.arange(len(y)), y).astype(np.float32)
+
+        # Random gain
+        if random.random() < 0.4:
+            y = y * random.uniform(0.7, 1.3)
+
+        # Additive noise
+        if random.random() < 0.3 and y.size > 0:
+            snr_db = random.uniform(10.0, 25.0)
+            rms = float(np.sqrt(np.mean(y.astype(np.float64) ** 2)) + 1e-8)
+            noise_rms = rms / (10.0 ** (snr_db / 20.0))
+            y = y + np.random.randn(len(y)).astype(np.float32) * noise_rms
+
+        # Time mask (zero a short span) — waveform-level SpecAug proxy
+        if random.random() < 0.4 and len(y) > self.sampling_rate:
+            max_mask = min(len(y) // 4, int(0.5 * self.sampling_rate))
+            if max_mask > 0:
+                w = random.randint(max(1, max_mask // 4), max_mask)
+                start = random.randint(0, max(0, len(y) - w))
+                y = y.copy()
+                y[start : start + w] = 0.0
+
+        # Peak clip safety
+        peak = float(np.max(np.abs(y)) + 1e-8)
+        if peak > 1.0:
+            y = y / peak
+        return y.astype(np.float32)
+
+    def _soft_truncate(self, y: np.ndarray, train: bool) -> np.ndarray:
+        y = np.asarray(y, dtype=np.float32).reshape(-1)
+        if len(y) <= self.max_samples:
+            return y
+        if not self.soft_truncate:
+            return y[: self.max_samples]
+        # Train: random crop keeps supervision on mid/late speech, not only t=0
+        if train and self.augment:
+            start = random.randint(0, len(y) - self.max_samples)
+            return y[start : start + self.max_samples]
+        # Eval: prefer start (reproducible); long clips still covered by multi-chunk inference
+        return y[: self.max_samples]
+
+    def _pad_fixed(self, y: np.ndarray) -> np.ndarray:
         y = np.asarray(y, dtype=np.float32).reshape(-1)
         if len(y) > self.max_samples:
             y = y[: self.max_samples]
@@ -95,12 +157,20 @@ class FixedLengthCTCCollator:
             if y is None:
                 continue
             y = np.asarray(y, dtype=np.float32).reshape(-1)
-            if sr is not None and sr != self.sampling_rate:
+            if sr is not None and int(sr) != self.sampling_rate:
                 import librosa
 
-                y = librosa.resample(y, orig_sr=sr, target_sr=self.sampling_rate).astype(np.float32)
-            y = self._maybe_augment(y)
-            y = self._fix_audio(y)
+                y = librosa.resample(
+                    y, orig_sr=int(sr), target_sr=self.sampling_rate
+                ).astype(np.float32)
+            if y.size < self.min_samples:
+                # skip near-empty clips (avoid CTC collapse noise)
+                continue
+            y = self._maybe_augment(y) if self.augment else y
+            if self.fixed_length:
+                y = self._pad_fixed(self._soft_truncate(y, train=self.augment))
+            else:
+                y = self._soft_truncate(y, train=self.augment)
             text = feat.get("normalized_transcription") or feat.get("transcription") or ""
             text = normalize_text(text)
             if not text:
@@ -109,20 +179,30 @@ class FixedLengthCTCCollator:
             texts.append(text)
 
         if not waves:
-            # Degenerate batch — return a tiny dummy so training can skip cleanly
-            dummy = np.zeros(self.max_samples, dtype=np.float32)
+            dummy = np.zeros(max(self.min_samples, 3200), dtype=np.float32)
             waves = [dummy]
             texts = ["a"]
 
-        inputs = self.processor(
-            waves,
-            sampling_rate=self.sampling_rate,
-            return_tensors="pt",
-            padding="max_length",
-            max_length=self.max_samples,
-            truncation=True,
-        )
-        # Prefer tokenizer path (as_target_processor is deprecated in recent transformers)
+        # Dynamic pad to batch max (GPU) OR fixed max_length (TPU)
+        if self.fixed_length:
+            inputs = self.processor(
+                waves,
+                sampling_rate=self.sampling_rate,
+                return_tensors="pt",
+                padding="max_length",
+                max_length=self.max_samples,
+                truncation=True,
+                return_attention_mask=True,
+            )
+        else:
+            inputs = self.processor(
+                waves,
+                sampling_rate=self.sampling_rate,
+                return_tensors="pt",
+                padding=True,  # pad to longest in batch only
+                return_attention_mask=True,
+            )
+
         label_ids = self.processor.tokenizer(
             texts,
             return_tensors="pt",
@@ -132,19 +212,22 @@ class FixedLengthCTCCollator:
         if pad_id is None:
             pad_id = self.processor.tokenizer.eos_token_id or 0
         labels = label_ids.masked_fill(label_ids == pad_id, -100)
+
         batch = {
             "input_values": inputs.input_values,
+            "attention_mask": inputs.attention_mask,
             "labels": labels,
         }
-        if "attention_mask" in inputs:
-            batch["attention_mask"] = inputs.attention_mask
         return batch
+
+
+# Back-compat alias
+FixedLengthCTCCollator = DynamicLengthCTCCollator
 
 
 class WaxalMMSDataModule:
     """
-    Lightweight data module (not a full LightningDataModule subclass dependency)
-    that builds torch DataLoaders with fixed-length collation.
+    Lightweight data module that builds torch DataLoaders with length-aware collation.
     """
 
     def __init__(self, config: dict, target_lang: str, fold: int, processor):
@@ -355,15 +438,24 @@ class WaxalMMSDataModule:
             kwargs["prefetch_factor"] = int(self.train_cfg.get("prefetch_factor", 2))
         return kwargs
 
+    def _make_collator(self, augment: bool) -> DynamicLengthCTCCollator:
+        max_sec = float(self.train_cfg.get("max_audio_seconds", 30.0))
+        # GPU default: dynamic pad. TPU / low-RAM can force fixed_length via config.
+        fixed = bool(self.train_cfg.get("fixed_length_pad", False))
+        soft = bool(self.train_cfg.get("soft_truncate", True))
+        return DynamicLengthCTCCollator(
+            processor=self.processor,
+            max_samples=int(max_sec * 16000),
+            augment=augment,
+            fixed_length=fixed,
+            soft_truncate=soft,
+            min_samples=int(float(self.train_cfg.get("min_audio_seconds", 0.5)) * 16000),
+        )
+
     def train_dataloader(self):
         from torch.utils.data import DataLoader
 
-        max_sec = float(self.train_cfg.get("max_audio_seconds", 16.0))
-        collator = FixedLengthCTCCollator(
-            processor=self.processor,
-            max_samples=int(max_sec * 16000),
-            augment=True,
-        )
+        collator = self._make_collator(augment=True)
         return DataLoader(
             self.train_dataset,
             batch_size=int(self.train_cfg.get("per_device_train_batch_size", 4)),
@@ -376,12 +468,7 @@ class WaxalMMSDataModule:
     def val_dataloader(self):
         from torch.utils.data import DataLoader
 
-        max_sec = float(self.train_cfg.get("max_audio_seconds", 16.0))
-        collator = FixedLengthCTCCollator(
-            processor=self.processor,
-            max_samples=int(max_sec * 16000),
-            augment=False,
-        )
+        collator = self._make_collator(augment=False)
         return DataLoader(
             self.val_dataset,
             batch_size=int(self.train_cfg.get("per_device_eval_batch_size", 4)),
@@ -448,6 +535,9 @@ def save_best_model(model, processor, output_dir: str, transcripts: Optional[Lis
     logger.info(f"Saving model + processor to {best_dir}")
     # Unwrap Lightning module if needed
     core = model.model if hasattr(model, "model") else model
+    # Disable SpecAug at save time so inference config is clean
+    if hasattr(core, "config"):
+        core.config.apply_spec_augment = False
     core.save_pretrained(best_dir)
     processor.save_pretrained(best_dir)
 
@@ -455,6 +545,13 @@ def save_best_model(model, processor, output_dir: str, transcripts: Optional[Lis
         try:
             from src.decoding.kenlm_utils import build_language_model
 
+            # Force rebuild so train-end always refreshes lm.bin with latest corpus
+            lm_bin = os.path.join(best_dir, "lm.bin")
+            if os.path.exists(lm_bin):
+                try:
+                    os.remove(lm_bin)
+                except OSError:
+                    pass
             lm_path = build_language_model(transcripts, best_dir, kenlm_dir="kenlm", order=5)
             if lm_path:
                 logger.info(f"KenLM binary at {lm_path}")
@@ -505,6 +602,26 @@ def train(args):
         model.config.pad_token_id = processor.tokenizer.pad_token_id
     model.config.ctc_zero_infinity = True
     model.config.ctc_loss_reduction = "mean"
+
+    # SpecAugment inside Wav2Vec2 encoder (time + feature masking) — training only effect
+    if bool(train_cfg.get("specaugment", True)):
+        model.config.apply_spec_augment = True
+        model.config.mask_time_prob = float(train_cfg.get("mask_time_prob", 0.05))
+        model.config.mask_time_length = int(train_cfg.get("mask_time_length", 10))
+        model.config.mask_feature_prob = float(train_cfg.get("mask_feature_prob", 0.05))
+        model.config.mask_feature_length = int(train_cfg.get("mask_feature_length", 10))
+        logger.info(
+            f"SpecAugment ON: mask_time_prob={model.config.mask_time_prob} "
+            f"mask_feature_prob={model.config.mask_feature_prob}"
+        )
+    else:
+        model.config.apply_spec_augment = False
+
+    logger.info(
+        f"Collate: max_audio_seconds={train_cfg.get('max_audio_seconds')} "
+        f"fixed_length_pad={train_cfg.get('fixed_length_pad', False)} "
+        f"soft_truncate={train_cfg.get('soft_truncate', True)}"
+    )
 
     dm = WaxalMMSDataModule(config, target_lang, fold, processor)
     dm.setup()
