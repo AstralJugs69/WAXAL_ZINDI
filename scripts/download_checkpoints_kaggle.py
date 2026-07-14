@@ -5,14 +5,19 @@ Reliable restore of WAXAL MMS checkpoints from Kaggle.
 Default dataset:
   cashgenenator/waxal-mms-checkpoints
 
-Why this exists:
-  - `kaggle datasets list -m` often shows size=0 even when the dataset is full (UI shows ~59GB).
-  - `download` can 404 if auth path is wrong or the CLI is confused.
-  - Uploaded layout may be FOLDERS (lin_mms-300m_fold0/...) not .tar.gz.
+Quirks handled:
+  - `list -m` size column often shows 0 (ignore it; web UI is correct)
+  - Bulk `datasets download` may 404 even when files list works
+    → fall back to **per-file** download (paginated)
+  - Upload layout may be nested:
+      lin_mms-300m_fold0/lin_mms-300m_fold0/checkpoints/...
+    We flatten to:
+      outputs/lin_mms-300m_fold0/...
 
 Usage:
   python scripts/download_checkpoints_kaggle.py
   python scripts/download_checkpoints_kaggle.py --dataset cashgenenator/waxal-mms-checkpoints
+  python lightning_studio_bootstrap.py download
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -65,98 +71,252 @@ def run_capture(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def list_dataset_files(cmd, dataset_id: str) -> list[str]:
-    """Return file paths reported by the API (best-effort)."""
-    # Prefer CSV for stable parsing
-    r = run_capture(cmd + ["datasets", "files", dataset_id, "-v", "--csv"])
-    if r.returncode != 0:
-        r = run_capture(cmd + ["datasets", "files", dataset_id])
-    out = (r.stdout or "") + "\n" + (r.stderr or "")
-    log("--- kaggle datasets files ---")
-    log(out.strip() or "(empty)")
-    names = []
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith("name"):
-            continue
-        # csv: name,size,creationDate...
-        name = line.split(",")[0].strip().strip('"')
-        if name and name not in ("name",):
-            names.append(name)
+def get_api():
+    from kaggle.api.kaggle_api_extended import KaggleApi
+
+    api = KaggleApi()
+    api.authenticate()
+    return api
+
+
+def list_all_files(api, dataset_id: str) -> list[str]:
+    """
+    Paginate through every file in the dataset.
+    Returns list of remote relative paths.
+    """
+    names: list[str] = []
+    # Newer kaggle API: dataset_list_files may not paginate; try page tokens via raw CLI first
+    cmd = kaggle_cmd()
+    page_token = None
+    page = 0
+    while True:
+        page += 1
+        c = cmd + ["datasets", "files", dataset_id, "-v", "--csv"]
+        if page_token:
+            # Some CLI versions support --page-token; if not, break after first page
+            c.extend(["--page-token", page_token])
+        r = run_capture(c)
+        out = r.stdout or ""
+        err = r.stderr or ""
+        if page == 1:
+            log("--- kaggle datasets files (page 1) ---")
+            # Don't dump huge tokens every time
+            for line in (out + err).splitlines()[:5]:
+                if "Next Page Token" in line:
+                    log("(has next page token… will paginate)")
+                elif line.strip():
+                    log(line[:200])
+
+        # Parse next page token if present
+        new_token = None
+        for line in (out + err).splitlines():
+            if "Next Page Token" in line or "nextPageToken" in line.lower():
+                # formats: "Next Page Token = TOKEN" or CSV field
+                if "=" in line:
+                    new_token = line.split("=", 1)[-1].strip()
+                else:
+                    parts = line.split()
+                    if parts:
+                        new_token = parts[-1].strip()
+
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("name"):
+                continue
+            if "Next Page Token" in line:
+                continue
+            name = line.split(",")[0].strip().strip('"')
+            if name and name not in names and not name.startswith("Next"):
+                names.append(name)
+
+        if not new_token or new_token == page_token:
+            # CLI may not support page-token; use Python API pagination if available
+            break
+        page_token = new_token
+        if page > 100:
+            log("WARNING: stopped pagination at 100 pages")
+            break
+        time.sleep(0.2)
+
+    # Python API fallback / fill
+    try:
+        # dataset_list_files returns first page only on many versions
+        fl = api.dataset_list_files(dataset_id)
+        file_list = getattr(fl, "files", fl) or []
+        for f in file_list:
+            n = getattr(f, "name", None) or str(f)
+            if n and n not in names:
+                names.append(n)
+    except Exception as exc:
+        log(f"Python list_files note: {exc}")
+
+    # If still short, try walking with page-token via API raw if present
+    if hasattr(api, "dataset_list_files_with_http_info"):
+        pass
+
+    log(f"Collected {len(names)} remote file path(s)")
+    if names:
+        log("Sample paths:")
+        for n in names[:8]:
+            log(f"  {n}")
+        if len(names) > 8:
+            log(f"  ... +{len(names) - 8} more")
     return names
 
 
-def download_via_cli(cmd, dataset_id: str, dest: Path) -> Path | None:
+def download_bulk(api, dataset_id: str, dest: Path) -> bool:
     dest.mkdir(parents=True, exist_ok=True)
-    # Clear partials
-    for p in dest.glob("*"):
-        if p.is_file() and p.suffix in (".zip", ".part"):
+    log(f"Trying bulk download of {dataset_id} …")
+    try:
+        api.dataset_download_files(
+            dataset_id, path=str(dest), unzip=True, quiet=False, force=True
+        )
+        # success if we got anything substantial
+        total = sum(f.stat().st_size for f in dest.rglob("*") if f.is_file())
+        log(f"Bulk download wrote ~{total / 1e9:.2f} GB under {dest}")
+        return total > 1_000_000
+    except Exception as exc:
+        log(f"Bulk download failed: {exc}")
+        return False
+
+
+def download_file_cli(cmd, dataset_id: str, file_name: str, dest: Path) -> bool:
+    dest.mkdir(parents=True, exist_ok=True)
+    # kaggle datasets download -d ID -f path/to/file -p dest
+    r = subprocess.run(
+        cmd
+        + [
+            "datasets",
+            "download",
+            "-d",
+            dataset_id,
+            "-f",
+            file_name,
+            "-p",
+            str(dest),
+            "--force",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        # show short error once
+        err = (r.stderr or r.stdout or "").strip().splitlines()
+        if err:
+            log(f"    CLI -f failed: {err[-1][:180]}")
+        return False
+    return True
+
+
+def download_file_api(api, dataset_id: str, file_name: str, dest: Path) -> bool:
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        api.dataset_download_file(
+            dataset_id, file_name, path=str(dest), force=True, quiet=True
+        )
+        return True
+    except Exception as exc:
+        log(f"    API file failed: {exc}")
+        return False
+
+
+def place_downloaded_file(dest: Path, remote_name: str):
+    """
+    Kaggle often drops the file basename into dest/, possibly zipped.
+    Move into dest/remote_name hierarchy when possible.
+    """
+    base = Path(remote_name).name
+    # unzip any zip that appeared
+    for z in dest.glob("*.zip"):
+        # only unzip small-ish zips that match this file
+        if base in z.name or z.stat().st_size < 50_000_000:
             try:
-                p.unlink()
+                with zipfile.ZipFile(z, "r") as zf:
+                    zf.extractall(dest)
+                z.unlink(missing_ok=True)
             except Exception:
                 pass
 
-    log(f"Downloading {dataset_id} → {dest} (this can take a long time ~60GB)…")
-    # NOTE: do NOT always pass --unzip first; inspect zip if present
-    r = subprocess.run(
-        cmd + ["datasets", "download", "-d", dataset_id, "-p", str(dest), "--force"],
-        check=False,
-    )
-    if r.returncode != 0:
-        log("CLI download failed; trying Python API…")
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-
-            api = KaggleApi()
-            api.authenticate()
-            api.dataset_download_files(dataset_id, path=str(dest), unzip=False, quiet=False, force=True)
-        except Exception as exc:
-            log(f"Python API download failed: {exc}")
-            return None
-
-    zips = sorted(dest.glob("*.zip"))
-    if zips:
-        return zips[0]
-    # maybe already extracted
-    if any(dest.iterdir()):
-        return dest
-    return None
+    target = dest / remote_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # if file already at target
+    if target.exists():
+        return
+    # find basename in dest tree (recent)
+    candidates = list(dest.rglob(base))
+    # prefer shallow matches not already under correct path
+    for c in candidates:
+        if c.is_file() and c.resolve() != target.resolve():
+            if not target.exists():
+                shutil.move(str(c), str(target))
+            break
 
 
-def unzip_all(dest: Path):
-    for z in dest.glob("*.zip"):
-        log(f"Unzipping {z.name} …")
-        with zipfile.ZipFile(z, "r") as zf:
-            zf.extractall(dest)
-        log(f"  done {z.name}")
+def download_per_file(api, dataset_id: str, names: list[str], dest: Path) -> int:
+    cmd = kaggle_cmd()
+    dest.mkdir(parents=True, exist_ok=True)
+    ok = 0
+    total = len(names)
+    log(f"Per-file download of {total} files (fallback because bulk 404)…")
+    for i, name in enumerate(names, 1):
+        # Skip huge lightning logs noise optional? keep all for completeness
+        log(f"[{i}/{total}] {name}")
+        success = download_file_api(api, dataset_id, name, dest)
+        if not success:
+            success = download_file_cli(cmd, dataset_id, name, dest)
+        if success:
+            place_downloaded_file(dest, name)
+            ok += 1
+        else:
+            log(f"  FAILED: {name}")
+        if i % 10 == 0:
+            time.sleep(0.5)
+    log(f"Per-file download: {ok}/{total} succeeded")
+    return ok
 
 
 def find_lang_dirs(root: Path) -> dict[str, Path]:
+    """
+    Find language output roots. Handles double nesting:
+      lin_mms-300m_fold0/lin_mms-300m_fold0/checkpoints
+    Prefer the innermost dir that contains checkpoints/ or best_model/.
+    """
     found = {}
     for lang in ("lin", "sna", "lug"):
-        # exact or nested
-        hits = list(root.rglob(f"{lang}_mms-300m_fold0"))
-        # prefer shortest path
-        hits = [h for h in hits if h.is_dir()]
-        if hits:
-            hits.sort(key=lambda p: len(p.parts))
-            found[lang] = hits[0]
+        pattern = f"{lang}_mms-300m_fold0"
+        hits = [p for p in root.rglob(pattern) if p.is_dir()]
+        if not hits:
+            continue
+        # Prefer dirs that look like real training outputs
+        scored = []
+        for h in hits:
+            score = 0
+            if (h / "checkpoints").is_dir():
+                score += 10
+            if (h / "best_model").is_dir():
+                score += 10
+            # prefer deeper (inner) nest when both exist
+            score += len(h.parts) * 0.01
+            scored.append((score, h))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        found[lang] = scored[0][1]
     return found
 
 
 def install_to_outputs(found: dict[str, Path], outputs: Path):
     outputs.mkdir(parents=True, exist_ok=True)
     for lang, src in found.items():
-        dst = outputs / src.name
+        dst = outputs / f"{lang}_mms-300m_fold0"
         if dst.exists():
             log(f"Removing existing {dst}")
             shutil.rmtree(dst)
-        log(f"Moving {src} → {dst}")
-        shutil.move(str(src), str(dst))
-        # sanity
-        ck = dst / "checkpoints"
-        bm = dst / "best_model"
-        log(f"  checkpoints: {ck.exists()}  best_model: {bm.exists()}")
+        log(f"Copying {src} → {dst}")
+        shutil.copytree(src, dst)
+        log(
+            f"  checkpoints={ (dst / 'checkpoints').exists() } "
+            f"best_model={ (dst / 'best_model').exists() }"
+        )
 
 
 def main():
@@ -176,65 +336,58 @@ def main():
             "/teamspace/studios/this_studio/WAXAL_ZINDI/outputs",
         ),
     )
-    ap.add_argument("--list-only", action="store_true", help="Only list remote files, do not download")
+    ap.add_argument("--list-only", action="store_true")
+    ap.add_argument(
+        "--force-per-file",
+        action="store_true",
+        help="Skip bulk download; always use per-file mode",
+    )
     args = ap.parse_args()
 
     setup_kaggle_json()
-    cmd = kaggle_cmd()
+    user = json.loads((Path.home() / ".kaggle" / "kaggle.json").read_text())["username"]
     dataset_id = args.dataset
     dl = Path(args.download_dir).expanduser().resolve()
     outputs = Path(args.outputs).expanduser().resolve()
 
-    user = json.loads((Path.home() / ".kaggle" / "kaggle.json").read_text())["username"]
     log(f"Kaggle user from kaggle.json: {user}")
     log(f"Dataset: {dataset_id}")
     log("")
-    log("NOTE: `kaggle datasets list -m` often shows size=0 even when the dataset")
-    log("is full (~59GB in the web UI). That column is unreliable — ignore it.")
-    log("Trust: website Data Explorer, or `kaggle datasets files`, or this script.")
+    log("NOTE: `kaggle datasets list -m` size=0 is often a LIE. Web UI / files list are truth.")
     log("")
 
-    # status
-    st = run_capture(cmd + ["datasets", "status", dataset_id])
-    log(f"status: {(st.stdout or st.stderr or '').strip()}")
-
-    files = list_dataset_files(cmd, dataset_id)
-    if files:
-        log(f"API reported {len(files)} file row(s) (names may be truncated).")
-    else:
-        log(
-            "API file list empty/failed — dataset may still be valid (web UI is source of truth). "
-            "Continuing with download attempt…"
-        )
-
+    api = get_api()
+    names = list_all_files(api, dataset_id)
     if args.list_only:
         return
 
-    result = download_via_cli(cmd, dataset_id, dl)
-    if result is None:
-        raise SystemExit(
-            "\nDOWNLOAD FAILED.\n"
-            "Checklist:\n"
-            f"  1) kaggle.json username is the owner of {dataset_id} (got: {user})\n"
-            "  2) Open the dataset in browser while logged in as that user\n"
-            "  3) Try: python -m kaggle datasets download -d "
-            f"{dataset_id} -p ./ckpt_dl --force\n"
-            "  4) Or download ZIP from the website and upload it to the studio\n"
-        )
+    if not names:
+        log("WARNING: file list empty from API — will still try bulk download")
 
-    unzip_all(dl)
+    dl.mkdir(parents=True, exist_ok=True)
+    bulk_ok = False
+    if not args.force_per_file:
+        bulk_ok = download_bulk(api, dataset_id, dl)
+
+    if not bulk_ok:
+        if not names:
+            raise SystemExit(
+                "Bulk download failed and no file list available.\n"
+                "Open the dataset in the browser and use Download, or fix kaggle.json."
+            )
+        n_ok = download_per_file(api, dataset_id, names, dl)
+        if n_ok == 0:
+            raise SystemExit("All per-file downloads failed.")
 
     found = find_lang_dirs(dl)
     if not found:
-        log("Could not find lin/sna/lug_mms-300m_fold0 directories. Tree:")
-        for p in sorted(dl.rglob("*"))[:80]:
-            log(f"  {p.relative_to(dl)}")
-        raise SystemExit(
-            "Download may have succeeded but layout unexpected. "
-            "Inspect ckpt_dl/ and move folders manually into outputs/."
-        )
+        log("Could not locate language folders. First 60 paths under download dir:")
+        for p in sorted(dl.rglob("*"))[:60]:
+            if p.is_file():
+                log(f"  {p.relative_to(dl)}")
+        raise SystemExit("Layout unexpected — inspect ckpt_dl/ manually.")
 
-    log(f"Found languages: {list(found.keys())}")
+    log(f"Found languages: {sorted(found.keys())}")
     install_to_outputs(found, outputs)
 
     log("")
@@ -243,8 +396,8 @@ def main():
     log(f"  outputs = {outputs}")
     for lang in ("lin", "sna", "lug"):
         d = outputs / f"{lang}_mms-300m_fold0"
-        log(f"  {lang}: exists={d.exists()}")
-    log("Next: python generate_submission.py --max-blank-frac 0.05")
+        log(f"  {lang}: {d.exists()}")
+    log("Next: python generate_submission.py --max-blank-frac 0.05 --hf_token '…'")
     log("=" * 64)
 
 
