@@ -15,14 +15,14 @@ GPU train all langs (after prep):
 GPU train one lang:
   python lightning_studio_bootstrap.py train --lang lug --epochs 10 --batch-size 16 --resume
 
-Upload checkpoints to Google Drive (resumable):
+Upload checkpoints to Kaggle dataset (preferred):
   python lightning_studio_bootstrap.py upload
 
 Env / files expected
 --------------------
-  kaggle.json  → /teamspace/studios/this_studio/kaggle.json  (for cache download)
+  kaggle.json  → /teamspace/studios/this_studio/kaggle.json
+                 (cache download + checkpoint dataset upload)
   HF_TOKEN     → optional (Common Voice only)
-  GOOGLE_APPLICATION_CREDENTIALS or client_secret.json → for Drive upload
 """
 from __future__ import annotations
 
@@ -38,9 +38,6 @@ REPO_URL = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
 REPO = STUDIO / "WAXAL_ZINDI"
 HF_HOME = Path(os.environ.get("HF_HOME", STUDIO / "hf_home"))
 OUTPUTS = Path(os.environ.get("WAXAL_OUTPUTS_DIR", REPO / "outputs"))
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru")
-
-
 def log(msg: str):
     print(msg, flush=True)
 
@@ -65,10 +62,8 @@ def configure_env():
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     os.environ["WAXAL_OUTPUTS_DIR"] = str(OUTPUTS)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ.setdefault("GDRIVE_FOLDER_ID", GDRIVE_FOLDER_ID)
     log(f"HF_HOME={HF_HOME}")
     log(f"WAXAL_OUTPUTS_DIR={OUTPUTS}")
-    log(f"GDRIVE_FOLDER_ID={os.environ['GDRIVE_FOLDER_ID']}")
 
 
 def ensure_repo():
@@ -186,21 +181,26 @@ def cmd_train(args):
 
 
 def cmd_upload(args):
+    """Upload checkpoints to Kaggle as a private dataset (uses kaggle.json)."""
     configure_env()
     ensure_repo()
     os.chdir(REPO)
     cmd = [
         sys.executable,
-        "scripts/upload_checkpoints_gdrive.py",
+        "scripts/upload_checkpoints_kaggle.py",
         "--outputs",
         str(OUTPUTS),
-        "--folder-id",
-        args.folder_id or os.environ["GDRIVE_FOLDER_ID"],
         "--langs",
         args.langs,
+        "--slug",
+        args.slug,
+        "--message",
+        args.message,
     ]
-    if args.keep_archives:
-        cmd.append("--keep-archives")
+    if args.skip_pack:
+        cmd.append("--skip-pack")
+    if args.public:
+        cmd.append("--public")
     run(cmd, check=False)
 
 
@@ -238,10 +238,17 @@ def main():
     p_train.add_argument("--config", type=str, default="config/base_mms_lightning_96gb.yaml")
     p_train.set_defaults(func=cmd_train)
 
-    p_up = sub.add_parser("upload", help="Upload checkpoints to Google Drive (resumable)")
+    p_up = sub.add_parser("upload", help="Upload checkpoints to Kaggle dataset")
     p_up.add_argument("--langs", type=str, default="lin,sna,lug")
-    p_up.add_argument("--folder-id", type=str, default=None)
-    p_up.add_argument("--keep-archives", action="store_true")
+    p_up.add_argument(
+        "--slug",
+        type=str,
+        default="waxal-mms-checkpoints",
+        help="Kaggle dataset slug under your username",
+    )
+    p_up.add_argument("--message", type=str, default="Update WAXAL MMS checkpoints")
+    p_up.add_argument("--skip-pack", action="store_true", help="Reuse existing .tar.gz packs")
+    p_up.add_argument("--public", action="store_true")
     p_up.set_defaults(func=cmd_upload)
 
     p_sub = sub.add_parser("submit", help="Generate submission.csv")

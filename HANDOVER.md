@@ -83,9 +83,10 @@ Exact epoch counts on disk may vary; **trust folders under `outputs/` and Drive 
 | GitHub | `AstralJugs69/WAXAL_ZINDI` `main` |
 | Kaggle HF cache dataset | `cashgenenator/waxal-hf-cache-chunks` (~54GB split tar `hf_cache.tar.aa`…`am`) |
 | Kaggle user | `cashgenenator` |
-| **Checkpoints Drive (NEW)** | https://drive.google.com/drive/folders/1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru |
-| Drive folder ID | `1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru` |
-| Old cache Drive (legacy HF chunks) | `1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB` (not checkpoint target) |
+| **Checkpoints on Kaggle (preferred)** | Dataset slug: `{kaggle_user}/waxal-mms-checkpoints` — see `docs/KAGGLE_CHECKPOINT_UPLOAD.md` |
+| Script | `scripts/upload_checkpoints_kaggle.py` / `lightning_studio_bootstrap.py upload` |
+| Google Drive | Deprecated for checkpoints (SA has no My Drive quota); optional folder `1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru` |
+| Old HF-cache Drive | `1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB` (cache chunks only, not model ckpts) |
 | HF cache on Lightning | `/teamspace/studios/this_studio/hf_home` |
 | Outputs on Lightning | `/teamspace/studios/this_studio/WAXAL_ZINDI/outputs` |
 
@@ -200,17 +201,18 @@ python -m src.training.lightning_mms \
 # add --resume when continuing
 ```
 
-### Drive upload (resumable)
-- Guide: `docs/GOOGLE_DRIVE_UPLOAD.md`
-- Script: `scripts/upload_checkpoints_gdrive.py`
-- Default folder ID: **`1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru`**
-- Auth: service account JSON + **share that folder with SA email as Editor**  
-  or `RCLONE_REMOTE=...`
+### Checkpoint upload → Kaggle dataset (preferred)
+- Guide: `docs/KAGGLE_CHECKPOINT_UPLOAD.md`
+- Script: `scripts/upload_checkpoints_kaggle.py`
+- Needs: same `kaggle.json` as cache download
+- Creates/updates: `{username}/waxal-mms-checkpoints` (private)
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/teamspace/studios/this_studio/waxal-sa.json
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
-python scripts/upload_checkpoints_gdrive.py --langs lin,sna,lug --keep-archives
+# kaggle.json at /teamspace/studios/this_studio/kaggle.json
+python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug
+# reuse existing tar.gz packs:
+python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug --skip-pack
 ```
 
 ---
