@@ -22,7 +22,7 @@ Env / files expected
 --------------------
   kaggle.json  → /teamspace/studios/this_studio/kaggle.json
                  (cache download + checkpoint dataset upload)
-  HF_TOKEN     → optional (Common Voice only)
+  HF_TOKEN     → optional; pass --hf_token hf_... (never commit tokens)
 """
 from __future__ import annotations
 
@@ -38,22 +38,46 @@ REPO_URL = "https://github.com/AstralJugs69/WAXAL_ZINDI.git"
 REPO = STUDIO / "WAXAL_ZINDI"
 HF_HOME = Path(os.environ.get("HF_HOME", STUDIO / "hf_home"))
 OUTPUTS = Path(os.environ.get("WAXAL_OUTPUTS_DIR", REPO / "outputs"))
+
+
 def log(msg: str):
     print(msg, flush=True)
 
 
+def apply_hf_token(token: str | None):
+    if not token or not str(token).strip():
+        return
+    t = str(token).strip()
+    os.environ["HF_TOKEN"] = t
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = t
+    log("HF_TOKEN set from --hf_token (value not printed)")
+
+
 def run(cmd, check=True, env=None):
-    log("\n>>> " + " ".join(map(str, cmd)))
+    # Redact secrets next to --hf_token / --token in logs
+    display = []
+    skip = False
+    for c in map(str, cmd):
+        if skip:
+            display.append("<redacted>")
+            skip = False
+            continue
+        if c in ("--hf_token", "--token"):
+            display.append(c)
+            skip = True
+            continue
+        display.append(c)
+    log("\n>>> " + " ".join(display))
     e = os.environ.copy()
     if env:
         e.update(env)
     r = subprocess.run(list(map(str, cmd)), env=e)
     if check and r.returncode != 0:
-        raise SystemExit(f"Command failed ({r.returncode}): {cmd}")
+        raise SystemExit(f"Command failed ({r.returncode})")
     return r.returncode
 
 
-def configure_env():
+def configure_env(hf_token: str | None = None):
     HF_HOME.mkdir(parents=True, exist_ok=True)
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(HF_HOME)
@@ -62,8 +86,10 @@ def configure_env():
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
     os.environ["WAXAL_OUTPUTS_DIR"] = str(OUTPUTS)
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    apply_hf_token(hf_token)
     log(f"HF_HOME={HF_HOME}")
     log(f"WAXAL_OUTPUTS_DIR={OUTPUTS}")
+    log(f"HF_TOKEN set: {bool(os.environ.get('HF_TOKEN'))}")
 
 
 def ensure_repo():
