@@ -1,4 +1,4 @@
-# HANDOVER — WAXAL ASR Challenge (Session 2026-07-12 → 2026-07-14)
+# HANDOVER — WAXAL ASR Challenge (Session 2026-07-12 → 2026-07-14+)
 
 **Read this first** before changing training, inference, or infrastructure.  
 This document is the operating bible for the next human developer or AI agent.
@@ -64,29 +64,42 @@ This document is the operating bible for the next human developer or AI agent.
 ### 2.4 Lightning AI workflow (credit-saving)
 1. **CPU machine**: data prep only (`scripts/setup_data_cpu.py` / `lightning_studio_bootstrap.py prep`).  
 2. **GPU machine (RTXP 6000 ~96–102GB VRAM, ~125GB RAM)**: train only.  
-3. **Checkpoints uploaded to Google Drive** so studio wipe ≠ total loss.
+3. **Checkpoints on Kaggle dataset** so studio wipe ≠ total loss (Google Drive SA upload abandoned).
 
 ### 2.5 Languages trained (approximate outcomes)
 
 | Lang | Outcome | Notes |
 |------|---------|--------|
 | **lin** | Strong | Long early run (~$5); train_loss got very low (~0.3 regime). Do **not** retrain unless needed. |
-| **sna** | Recovered | First schedule stuck (~2.8 loss, batch 48 too few updates). Restart with **batch 16, lr 3e-4, unfreeze FE** → train~0.59 / val~1.02. Resume/export fixed for PT 2.6. |
-| **lug** | In progress / resume to 10 | Same recipe as successful sna: batch 16, lr 3e-4, unfreeze. |
+| **sna** | Recovered + continued | Stuck ~2.8 with batch 48; fixed with **batch 16, lr 3e-4, unfreeze FE** → train~0.59 / val~1.02; resumed past PT2.6 ckpt load bugs. |
+| **lug** | Trained (pack uploaded) | Same recipe; packed as `lug_mms-300m_fold0.tar.gz` (~20GB) into Kaggle dataset. |
 
-Exact epoch counts on disk may vary; **trust folders under `outputs/` and Drive tarballs**, not chat memory.
+Exact epoch counts may vary; **trust Kaggle dataset tarballs + `outputs/`**, not chat memory.
 
-### 2.6 Infrastructure locations
+### 2.6 Checkpoint backup decision (important)
+
+| Attempt | Result |
+|---------|--------|
+| Google Drive + **service account** | **FAILED** — `Service Accounts do not have storage quota` on personal My Drive even when folder is shared |
+| Google Drive + OAuth | Documented but user abandoned (confusing setup) |
+| **Kaggle dataset** | **SUCCESS** — uses existing `kaggle.json` |
+
+**Live checkpoint dataset (as of 2026-07-14):**  
+https://www.kaggle.com/datasets/cashgenenator/waxal-mms-checkpoints  
+
+Contains resumable packs: `lin_mms-300m_fold0.tar.gz`, `sna_…`, `lug_…` (each ~20GB).
+
+### 2.7 Infrastructure locations
 
 | Asset | Location |
 |-------|----------|
 | GitHub | `AstralJugs69/WAXAL_ZINDI` `main` |
-| Kaggle HF cache dataset | `cashgenenator/waxal-hf-cache-chunks` (~54GB split tar `hf_cache.tar.aa`…`am`) |
+| Kaggle HF cache dataset | `cashgenenator/waxal-hf-cache-chunks` (~54GB split tar) |
 | Kaggle user | `cashgenenator` |
-| **Checkpoints on Kaggle (preferred)** | Dataset slug: `{kaggle_user}/waxal-mms-checkpoints` — see `docs/KAGGLE_CHECKPOINT_UPLOAD.md` |
-| Script | `scripts/upload_checkpoints_kaggle.py` / `lightning_studio_bootstrap.py upload` |
-| Google Drive | Deprecated for checkpoints (SA has no My Drive quota); optional folder `1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru` |
-| Old HF-cache Drive | `1uDx64kRRT23e7ZSfkLS9f014g2oJS3WB` (cache chunks only, not model ckpts) |
+| **Checkpoints dataset** | **`cashgenenator/waxal-mms-checkpoints`** |
+| Upload script | `scripts/upload_checkpoints_kaggle.py` |
+| Upload docs | `docs/KAGGLE_CHECKPOINT_UPLOAD.md` |
+| Drive (legacy/optional) | `1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru` — not required |
 | HF cache on Lightning | `/teamspace/studios/this_studio/hf_home` |
 | Outputs on Lightning | `/teamspace/studios/this_studio/WAXAL_ZINDI/outputs` |
 
@@ -136,11 +149,11 @@ python -m src.training.lightning_mms \
   - `trainer.fit(..., weights_only=False)` / torch.load fallback
 - `--resume` loads `last.ckpt` or newest `.ckpt`.
 
-### 3.7 Studio wipe recovery
-1. Clone repo.  
-2. CPU prep **or** restore `hf_home` if still on disk.  
-3. Download `*_mms-300m_fold0.tar.gz` from Drive → extract into `outputs/`.  
-4. Continue train / `generate_submission.py` / re-upload.
+### 3.7 Studio wipe recovery (current procedure)
+1. Clone repo + place `kaggle.json`.  
+2. Download **`cashgenenator/waxal-mms-checkpoints`** → extract tarballs into `outputs/`.  
+3. CPU prep if `hf_home` missing (`lightning_studio_bootstrap.py prep` or attach/extract HF cache).  
+4. Continue train / submit / re-upload new versions to the same Kaggle dataset.
 
 ### 3.8 Kaggle constraints (if using free GPUs)
 | Pool | Limit | Implication |
@@ -158,61 +171,98 @@ python -m src.training.lightning_mms \
 
 ---
 
-## 4. Fresh Lightning VM bootstrap (after crash)
+## 4. Fresh Lightning VM bootstrap (after crash) — COPY/PASTE
 
-### Entry point (preferred)
+**Prereqs on the new studio:** upload `kaggle.json` to  
+`/teamspace/studios/this_studio/kaggle.json`
+
+### 4.1 One block: clone + restore checkpoints + env (start here)
+
 ```bash
-cd /teamspace/studios/this_studio
-git clone --depth 1 https://github.com/AstralJugs69/WAXAL_ZINDI.git   # or pull if exists
-cd WAXAL_ZINDI
-git pull origin main
+# === NEW LIGHTNING VM — restore from Kaggle checkpoints ===
+export STUDIO=/teamspace/studios/this_studio
+export HF_HOME=$STUDIO/hf_home
+export HF_HUB_CACHE=$HF_HOME/hub
+export HF_DATASETS_CACHE=$HF_HOME/datasets
+export WAXAL_OUTPUTS_DIR=$STUDIO/WAXAL_ZINDI/outputs
+export TOKENIZERS_PARALLELISM=false
 
-# Put kaggle.json at /teamspace/studios/this_studio/kaggle.json for cache download
-python lightning_studio_bootstrap.py prep          # CPU machine
-# later on GPU:
-python lightning_studio_bootstrap.py train --lang lug --epochs 10 --batch-size 16 --lr 3e-4 --resume
-python lightning_studio_bootstrap.py upload --langs lin,sna,lug --keep-archives
-python lightning_studio_bootstrap.py submit
+mkdir -p $HOME/.kaggle
+cp -f $STUDIO/kaggle.json $HOME/.kaggle/kaggle.json
+chmod 600 $HOME/.kaggle/kaggle.json
+
+cd $STUDIO
+if [ -d WAXAL_ZINDI/.git ]; then
+  cd WAXAL_ZINDI && git pull origin main
+else
+  git clone --depth 1 https://github.com/AstralJugs69/WAXAL_ZINDI.git
+  cd WAXAL_ZINDI
+fi
+git log -1 --oneline
+
+pip install -q kaggle
+
+mkdir -p outputs ckpt_dl
+# Download checkpoint packs (private dataset under cashgenenator)
+python -m kaggle datasets download \
+  -d cashgenenator/waxal-mms-checkpoints \
+  -p ./ckpt_dl --unzip
+
+# Unpack into outputs/
+for f in ckpt_dl/*_mms-300m_fold0.tar.gz; do
+  echo "Extracting $f ..."
+  tar -xzf "$f" -C outputs/
+done
+
+ls -la outputs/
+ls outputs/*/checkpoints 2>/dev/null
+ls outputs/*/best_model 2>/dev/null
+
+echo "Checkpoints restored. Next: CPU prep (if needed) or submission/train."
 ```
 
-### Restore checkpoints from Drive first
+### 4.2 CPU prep (only if HF cache missing — free/cheap machine)
+
 ```bash
-# After downloading tar.gz from Drive into studio:
 cd /teamspace/studios/this_studio/WAXAL_ZINDI
-mkdir -p outputs
-tar -xzf lin_mms-300m_fold0.tar.gz -C outputs/
-tar -xzf sna_mms-300m_fold0.tar.gz -C outputs/
-tar -xzf lug_mms-300m_fold0.tar.gz -C outputs/
-ls outputs/*/checkpoints outputs/*/best_model
+# needs kaggle.json for waxal-hf-cache-chunks
+python lightning_studio_bootstrap.py prep
+# or: python scripts/setup_data_cpu.py
+test -f /teamspace/studios/this_studio/hf_home/extraction_completed.txt && echo HF_CACHE_OK
 ```
 
-### Proven GPU train recipe (lin/sna/lug)
+### 4.3 GPU: install train deps + submit (if all three best_model exist)
+
 ```bash
+cd /teamspace/studios/this_studio/WAXAL_ZINDI
 export HF_HOME=/teamspace/studios/this_studio/hf_home
 export HF_HUB_CACHE=$HF_HOME/hub
 export HF_DATASETS_CACHE=$HF_HOME/datasets
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
 
-python -m src.training.lightning_mms \
-  --config config/base_mms_lightning_96gb.yaml \
-  --target_lang LANGUAGE --fold 0 --devices 1 \
-  --epochs N --batch_size 16 --lr 3e-4 \
-  --unfreeze_feature_encoder --no_early_stopping
-# add --resume when continuing
+pip install -q lightning "transformers>=4.40.0" "datasets>=2.19.0,<4.0.0" \
+  accelerate librosa soundfile jiwer pyyaml scikit-learn evaluate tqdm
+
+python generate_submission.py --max-blank-frac 0.05
+ls -la submission.csv
 ```
 
-### Checkpoint upload → Kaggle dataset (preferred)
-- Guide: `docs/KAGGLE_CHECKPOINT_UPLOAD.md`
-- Script: `scripts/upload_checkpoints_kaggle.py`
-- Needs: same `kaggle.json` as cache download
-- Creates/updates: `{username}/waxal-mms-checkpoints` (private)
+### 4.4 GPU: resume a language if needed
+
+```bash
+python -m src.training.lightning_mms \
+  --config config/base_mms_lightning_96gb.yaml \
+  --target_lang lug --fold 0 --devices 1 \
+  --epochs 10 --batch_size 16 --lr 3e-4 \
+  --unfreeze_feature_encoder --resume --no_early_stopping
+```
+
+### 4.5 Re-upload after any new training
 
 ```bash
 export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
-# kaggle.json at /teamspace/studios/this_studio/kaggle.json
 python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug
-# reuse existing tar.gz packs:
-python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug --skip-pack
+# creates a NEW VERSION of cashgenenator/waxal-mms-checkpoints
 ```
 
 ---
@@ -223,8 +273,9 @@ python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug --skip-pack
 |------|------|
 | `lightning_studio_bootstrap.py` | **Session entry**: prep / train / upload / submit |
 | `scripts/setup_data_cpu.py` | CPU: Kaggle cache + models + external + fold CSVs |
-| `scripts/upload_checkpoints_gdrive.py` | Resumable Drive upload of checkpoint tarballs |
-| `docs/GOOGLE_DRIVE_UPLOAD.md` | Step-by-step Drive auth + upload |
+| `scripts/upload_checkpoints_kaggle.py` | **Preferred** checkpoint backup → Kaggle dataset |
+| `docs/KAGGLE_CHECKPOINT_UPLOAD.md` | How to upload/download ckpts via Kaggle |
+| `scripts/upload_checkpoints_gdrive.py` | Legacy Drive upload (OAuth only on personal Drive) |
 | `src/training/lightning_mms.py` | **Main trainer** (Lightning + MMS CTC) |
 | `config/base_mms_lightning_96gb.yaml` | High-VRAM Lightning config (external ON) |
 | `config/base_mms_gpu.yaml` | Kaggle 2×T4 / 30GB RAM (low_ram, external OFF) |
@@ -251,39 +302,39 @@ python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug --skip-pack
 - [ ] Duration decode filter at ~38 ex/s looks “hung” and can drop 80% of data — **off by default**.  
 - [ ] Dual-GPU DDP on 30GB host RAM **doubles** dataset footprint — use `devices=1` on Kaggle.  
 - [ ] Common Voice needs `HF_TOKEN` + license accept; FLEURS usually does not.  
-- [ ] `kaggle.json` is enough for cache dataset download; HF token is optional for CV.  
+- [ ] `kaggle.json` is enough for cache **and** checkpoint dataset upload/download; HF token optional for CV.  
+- [ ] **Never** use Google SA for personal Drive uploads (`storageQuotaExceeded`).  
 - [ ] Competition: avoid models pretrained on full WAXAL including Phase-1 test leakage.
 
 ---
 
 ## 7. Immediate next steps (priority order)
 
-1. **Fresh Lightning VM**  
-   - `git pull` / clone.  
-   - Restore checkpoint tarballs from Drive folder `1r6Vzl9MjoRzC5wKXU699eOwOF1A7A_ru`.  
-   - Re-run CPU prep if `hf_home` missing (`lightning_studio_bootstrap.py prep`).
+1. **Fresh Lightning VM** (studio wiped; **$15 topped up**)  
+   - Run **§4.1** below: clone + download `cashgenenator/waxal-mms-checkpoints` + extract to `outputs/`.  
+   - CPU prep only if HF cache missing (§4.2).
 
-2. **Finish lug** (if not already)  
-   - Same recipe as sna success: batch 16, lr 3e-4, unfreeze, epochs ~8–10, `--resume`.
+2. **Verify all three languages restored**  
+   - `outputs/{lin,sna,lug}_mms-300m_fold0/checkpoints` and ideally `best_model/`.
 
-3. **Export `best_model/`** for each lang if only `.ckpt` exists (train script end-of-run, or load ckpt + `save_best_model`).
-
-4. **Generate submission**  
+3. **Generate Phase-1 submission** (main goal after restore)  
    ```bash
    python generate_submission.py --max-blank-frac 0.05
    ```
-   Prefer GPU host for speed; needs all three `outputs/{lang}_mms-300m_fold0/best_model/`.
+   Prefer GPU for speed.
 
-5. **Re-upload** new/better checkpoints to Drive after any train.
+4. **Only if a language is weak / incomplete**  
+   - Resume with proven recipe: batch 16, lr 3e-4, unfreeze, capped epochs.  
+   - Re-upload: `python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug`.
 
-6. **Phase-2 readiness** (after Phase-1 baseline solid)  
+5. **Phase-2 readiness** (after Phase-1 MMS baseline submitted)  
    - Wire `ProductionASRPipeline` (VAD + MMS-LID + per-lang MMS).  
    - KenLM + pyctcdecode α/β on OOS folds.  
    - Optional Whisper ensemble.
 
-7. **Leaderboard**  
+6. **Leaderboard**  
    - Historical public score ~0.5 with Gemma-era system.  
-   - Re-submit after MMS lin/sna/lug are all exported and inference is clean.
+   - Expect large jump once all three MMS `best_model` folders feed `generate_submission.py`.
 
 ---
 
@@ -303,10 +354,18 @@ python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug --skip-pack
 
 ## 9. Session meta
 
-- **Dates:** 2026-07-12 → 2026-07-14  
-- **User constraints:** Very low remaining compute budget; studio can wipe; checkpoints must live on Drive.  
+- **Dates:** 2026-07-12 → 2026-07-14 (+ checkpoint backup day)  
+- **User constraints:** Tight Lightning credits; studio can wipe entirely; **checkpoints must live off-VM**.  
+- **Checkpoint home:** Kaggle dataset **`cashgenenator/waxal-mms-checkpoints`** (upload finished successfully).  
 - **Agent instruction:** Prefer small reversible changes; always check real files under `waxal_asr_challenge` before advising; keep Phase-2 generalization first.  
-- **Do not** regenerate long one-off command walls — extend `lightning_studio_bootstrap.py` and docs instead.
+- **Do not** regenerate long one-off command walls — extend `lightning_studio_bootstrap.py` and this HANDOVER.
+
+### 9.1 Changelog since first HANDOVER.md commit
+- Abandoned Google Drive SA upload (quota error); switched to **Kaggle datasets**.  
+- Added `scripts/upload_checkpoints_kaggle.py` + `docs/KAGGLE_CHECKPOINT_UPLOAD.md`.  
+- Confirmed dataset URL: https://www.kaggle.com/datasets/cashgenenator/waxal-mms-checkpoints  
+- Packs: lin/sna/lug `*_mms-300m_fold0.tar.gz` (~20GB each) uploaded.  
+- Fresh VM procedure rewritten around **Kaggle download → tar -xzf → outputs/**.
 
 ---
 
@@ -320,8 +379,9 @@ test -f /teamspace/studios/this_studio/hf_home/extraction_completed.txt && echo 
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-If checkpoints only on Drive: download tarballs → extract to `outputs/` → then submit or resume.
+If `outputs/` empty: re-run **§4.1** (download `cashgenenator/waxal-mms-checkpoints`).
 
 ---
 
 *End of handover. Update this file at the end of every major session.*
+
