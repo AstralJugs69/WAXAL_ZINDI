@@ -30,9 +30,9 @@ training:
   early_stopping_patience: 3
   early_stopping_min_delta: 0.01
   max_audio_seconds: 20.0
-  # 125GB system RAM — feed the GPU; raise if CPU still idle
-  num_workers: 12
-  prefetch_factor: 4
+  # 125GB system RAM — keep GPU fed; workers × prefetch ≈ RAM for audio batches
+  num_workers: 16
+  prefetch_factor: 6
   pin_memory: true
 
 data:
