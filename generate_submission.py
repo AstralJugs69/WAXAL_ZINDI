@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import glob
 import logging
 import numpy as np
@@ -403,8 +404,9 @@ def _read_expected_submission_ids(test_csv_path):
     return ids
 
 
-def _merge_worker_predictions(worker_results):
-    combined_predictions = {}
+def _merge_worker_predictions(worker_results, expected_ids=None):
+    # Seed every expected ID so a crashed worker cannot drop rows from the merge.
+    combined_predictions = {str(i).strip(): "" for i in (expected_ids or [])}
     duplicate_predictions = []
 
     for worker_id, predictions in worker_results.items():
@@ -413,18 +415,18 @@ def _merge_worker_predictions(worker_results):
             continue
         for audio_id, transcription in dict(predictions).items():
             audio_id = str(audio_id).strip()
-            if audio_id in combined_predictions and combined_predictions[audio_id]:
+            text = "" if transcription is None else str(transcription)
+            if audio_id in combined_predictions and combined_predictions[audio_id].strip():
                 # Keep the first non-empty prediction; overwrite only if current is blank.
-                if transcription:
+                if text.strip():
                     duplicate_predictions.append(audio_id)
                 continue
-            if audio_id in combined_predictions and not combined_predictions[audio_id] and transcription:
-                combined_predictions[audio_id] = str(transcription)
+            if audio_id in combined_predictions and not combined_predictions[audio_id].strip() and text.strip():
+                combined_predictions[audio_id] = text
                 continue
-            if audio_id in combined_predictions:
-                duplicate_predictions.append(audio_id)
+            if audio_id in combined_predictions and not text.strip():
                 continue
-            combined_predictions[audio_id] = "" if transcription is None else str(transcription)
+            combined_predictions[audio_id] = text
 
     if duplicate_predictions:
         logger.warning(
@@ -434,20 +436,56 @@ def _merge_worker_predictions(worker_results):
     return combined_predictions
 
 
+def _sanitize_target(text) -> str:
+    """
+    Clean a prediction for CSV / Zindi.
+
+    CRITICAL: empty Target cells become NaN when Zindi does pd.read_csv(...).
+    Many Zindi metrics then report those rows as
+      "Missing entries for IDs …"
+    even though the ID row was present in the file. Never emit a truly empty field.
+    """
+    if text is None or (isinstance(text, float) and pd.isna(text)):
+        return ""
+    s = str(text)
+    # collapse newlines / control chars that can break CSV row alignment
+    s = re.sub(r"[\r\n\t]+", " ", s)
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _write_validated_submission(expected_ids, combined_predictions, output_path="submission.csv", max_blank_frac=0.02):
+    import csv
+
+    expected_ids = [str(i).strip() for i in expected_ids]
     expected_set = set(expected_ids)
-    extra_ids = sorted(set(combined_predictions) - expected_set)
+    if len(expected_ids) != len(expected_set):
+        raise RuntimeError("expected_ids contains duplicates — fix SampleSubmission/Test.csv first.")
+
+    extra_ids = sorted(set(str(k).strip() for k in combined_predictions) - expected_set)
     if extra_ids:
         logger.warning(
             f"Ignoring {len(extra_ids)} predictions for IDs not present in expected submission. "
             f"First few: {extra_ids[:10]}"
         )
 
-    rows = [
-        {"ID": audio_id, "Target": combined_predictions.get(audio_id, "")}
-        for audio_id in expected_ids
-    ]
-    submission_df = pd.DataFrame(rows, columns=["ID", "Target"])
+    # Always emit ONE row per expected ID (SampleSubmission order). Never drop rows.
+    raw_targets = []
+    blank_ids = []
+    for audio_id in expected_ids:
+        cleaned = _sanitize_target(combined_predictions.get(audio_id, ""))
+        if not cleaned:
+            blank_ids.append(audio_id)
+            # Non-empty placeholder so Zindi's read_csv does not turn Target into NaN.
+            # A single space is ignored by most WER normalizers after strip, but keeps the cell present.
+            cleaned = " "
+        raw_targets.append(cleaned)
+
+    submission_df = pd.DataFrame(
+        {"ID": expected_ids, "Target": raw_targets},
+        columns=["ID", "Target"],
+    )
 
     if len(submission_df) != len(expected_ids):
         raise RuntimeError(f"Submission row count mismatch: got {len(submission_df)}, expected {len(expected_ids)}")
@@ -456,17 +494,18 @@ def _write_validated_submission(expected_ids, combined_predictions, output_path=
     if submission_df["ID"].duplicated().any():
         dupes = submission_df.loc[submission_df["ID"].duplicated(), "ID"].head(10).tolist()
         raise RuntimeError(f"Submission contains duplicate IDs: {dupes}")
-    missing_ids = [audio_id for audio_id in expected_ids if audio_id not in set(submission_df["ID"])]
-    if missing_ids:
-        raise RuntimeError(f"Submission is missing expected IDs: {missing_ids[:10]}")
+    if set(submission_df["ID"].astype(str)) != expected_set:
+        missing = sorted(expected_set - set(submission_df["ID"].astype(str)))
+        raise RuntimeError(f"Submission is missing expected IDs: {missing[:10]}")
 
-    blank_mask = submission_df["Target"].fillna("").astype(str).str.len() == 0
-    blank_count = int(blank_mask.sum())
+    # Count "real" blanks (whitespace-only placeholders after strip)
+    effective_blank_mask = submission_df["Target"].astype(str).str.strip().eq("")
+    blank_count = int(effective_blank_mask.sum())
     blank_frac = blank_count / max(len(submission_df), 1)
-    blank_ids = submission_df.loc[blank_mask, "ID"].tolist()
+    blank_ids = submission_df.loc[effective_blank_mask, "ID"].tolist()
     if blank_count:
         logger.warning(
-            f"Submission contains {blank_count} blank transcriptions "
+            f"Submission contains {blank_count} blank/placeholder transcriptions "
             f"({blank_frac:.1%}). First few: {blank_ids[:10]}"
         )
     if blank_frac > max_blank_frac:
@@ -475,12 +514,46 @@ def _write_validated_submission(expected_ids, combined_predictions, output_path=
             f"Fix model/audio loading before submitting. Blank IDs sample: {blank_ids[:20]}"
         )
 
+    # Defensive: every Target must be non-empty so Zindi never sees NaN after read_csv
+    empty_cells = submission_df["Target"].astype(str).eq("")
+    if empty_cells.any():
+        submission_df.loc[empty_cells, "Target"] = " "
+
     temp_path = f"{output_path}.tmp"
-    submission_df.to_csv(temp_path, index=False)
+    # QUOTE_ALL + explicit UTF-8 avoids Excel/parser edge cases on special orthography
+    submission_df.to_csv(
+        temp_path,
+        index=False,
+        encoding="utf-8",
+        lineterminator="\n",
+        quoting=csv.QUOTE_ALL,
+        na_rep=" ",
+    )
     os.replace(temp_path, output_path)
+
+    # Round-trip verify the way Zindi typically loads files (default read_csv)
+    verify = pd.read_csv(output_path, dtype=str)
+    if list(verify.columns)[:2] != ["ID", "Target"]:
+        raise RuntimeError(f"Written submission has unexpected columns: {list(verify.columns)}")
+    if len(verify) != len(expected_ids):
+        raise RuntimeError(
+            f"Round-trip row count mismatch: wrote {len(expected_ids)}, re-read {len(verify)}"
+        )
+    verify_ids = set(verify["ID"].astype(str).str.strip())
+    missing_rt = sorted(expected_set - verify_ids)
+    if missing_rt:
+        raise RuntimeError(f"Round-trip missing IDs after write: {missing_rt[:10]}")
+    # NaN Targets after default read_csv == Zindi "Missing entries"
+    nan_targets = verify["Target"].isna() | (verify["Target"].astype(str).str.lower() == "nan")
+    if nan_targets.any():
+        bad = verify.loc[nan_targets, "ID"].head(20).tolist()
+        raise RuntimeError(
+            f"Round-trip found NaN/empty Targets (Zindi reports these as Missing entries): {bad}"
+        )
+
     logger.info(
         f"Validated submission written to {output_path}: {len(submission_df)} rows, "
-        f"{blank_count} blanks, 0 missing IDs."
+        f"{blank_count} placeholders, 0 missing IDs (round-trip OK)."
     )
     return blank_ids
 
@@ -745,48 +818,77 @@ def worker_inference(
 
 def _load_test_audio_dict(test_ids):
     """
-    Stream HF test splits and cache audio keyed only by canonical example IDs.
+    Load HF test splits and cache audio keyed only by canonical example IDs.
+
+    Prefer non-streaming load (full ID coverage); fall back to streaming if RAM fails.
     """
     import datasets
 
     expected = set(str(i).strip() for i in test_ids)
     audio_dict = {}
-    missing_after_load = set(expected)
 
     for lang in ["lin", "sna", "lug"]:
-        logger.info(f"Streaming and caching test split from HF Hub for {lang}...")
+        logger.info(f"Loading and caching test split from HF Hub for {lang}...")
+        lang_ds = None
+        # Non-streaming is more reliable for full coverage; streaming as fallback.
+        for streaming in (False, True):
+            try:
+                lang_ds = datasets.load_dataset(
+                    "google/WaxalNLP",
+                    name=f"{lang}_asr",
+                    split="test",
+                    streaming=streaming,
+                )
+                lang_ds = lang_ds.cast_column("audio", datasets.Audio(sampling_rate=16000))
+                mode = "streaming" if streaming else "map-style"
+                logger.info(f"  {lang}: loaded test split ({mode})")
+                break
+            except Exception as e:
+                logger.warning(f"  {lang}: load failed (streaming={streaming}): {e}")
+                lang_ds = None
+        if lang_ds is None:
+            logger.warning(f"Failed to cache test split for {lang}")
+            continue
+
+        count = 0
         try:
-            lang_test = datasets.load_dataset(
-                "google/WaxalNLP", name=f"{lang}_asr", split="test", streaming=True
-            )
-            lang_test = lang_test.cast_column("audio", datasets.Audio(sampling_rate=16000))
-            count = 0
-            for ex in lang_test:
+            iterator = lang_ds if hasattr(lang_ds, "__iter__") else iter(lang_ds)
+            for ex in iterator:
+                if not isinstance(ex, dict):
+                    # datasets row object
+                    try:
+                        ex = dict(ex)
+                    except Exception:
+                        continue
                 ex_id = canonical_example_id(ex)
                 if not ex_id:
                     continue
                 ex_id = str(ex_id).strip()
-                if ex_id not in expected and not any(
-                    ex_id.startswith(f"{prefix}_") for prefix in ("lin", "sna", "lug")
-                ):
+                # Keep any expected ID; also keep lang-prefixed IDs that match this split
+                if ex_id not in expected and not ex_id.startswith(f"{lang}_"):
                     continue
-                # Contiguous array copy to release file descriptors and prevent memory leaks
+                audio = ex.get("audio") or {}
+                arr = audio.get("array") if isinstance(audio, dict) else None
+                sr = audio.get("sampling_rate", 16000) if isinstance(audio, dict) else 16000
+                if arr is None:
+                    continue
                 audio_dict[ex_id] = {
-                    "array": np.asarray(ex["audio"]["array"]).copy(),
-                    "sampling_rate": ex["audio"]["sampling_rate"],
+                    "array": np.asarray(arr).copy(),
+                    "sampling_rate": sr,
                 }
                 count += 1
-                missing_after_load.discard(ex_id)
             logger.info(f"Successfully cached {count} test examples in RAM for {lang}")
         except Exception as e:
-            logger.warning(f"Failed to cache test split for {lang}: {e}")
+            logger.warning(f"Failed while iterating test split for {lang}: {e}")
 
     still_missing = sorted(i for i in expected if i not in audio_dict)
     if still_missing:
         logger.warning(
-            f"{len(still_missing)} expected Test IDs have no audio after HF stream. "
+            f"{len(still_missing)} expected Test IDs have no audio after HF load. "
             f"First few: {still_missing[:10]}"
         )
+    else:
+        logger.info(f"Audio coverage complete: {len(audio_dict)} / {len(expected)} IDs")
     return audio_dict
 
 
@@ -841,7 +943,7 @@ def _run_parallel_inference(test_ids, audio_dict, target_languages, hf_token, pr
             )
 
     worker_results = {w_id: dict(return_dict.get(w_id, {})) for w_id in range(num_workers)}
-    return _merge_worker_predictions(worker_results)
+    return _merge_worker_predictions(worker_results, expected_ids=test_ids)
 
 
 def _retry_blank_ids(blank_ids, audio_dict, target_languages, hf_token, prefer_gemma=False):
@@ -868,19 +970,94 @@ def _retry_blank_ids(blank_ids, audio_dict, target_languages, hf_token, prefer_g
     return dict(return_dict.get(0, {}))
 
 
+def _ensure_best_models_from_checkpoints(target_languages):
+    """
+    If best_model/ is missing but Lightning .ckpt exists, export HF weights so
+    generate_submission uses the fine-tune instead of base mms-1b-all.
+    """
+    import torch
+    from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+
+    for lang in target_languages:
+        out = Path(get_outputs_dir()) / f"{lang}_mms-300m_fold0"
+        best = out / "best_model"
+        if best.is_dir() and (best / "config.json").exists():
+            continue
+        ckpt_dir = out / "checkpoints"
+        if not ckpt_dir.is_dir():
+            logger.warning(f"No best_model and no checkpoints for {lang} under {out}")
+            continue
+        # Prefer lowest val_loss epoch ckpt, then last.ckpt, then newest
+        scored = []
+        for p in ckpt_dir.glob("*.ckpt"):
+            name = p.name
+            m = re.search(r"val_loss=([0-9.]+)", name)
+            if m:
+                try:
+                    scored.append((0, float(m.group(1)), p))
+                    continue
+                except ValueError:
+                    pass
+            if name.startswith("last"):
+                scored.append((1, 0.0, p))
+            else:
+                scored.append((2, -p.stat().st_mtime, p))
+        if not scored:
+            logger.warning(f"No .ckpt files for {lang}")
+            continue
+        scored.sort(key=lambda t: (t[0], t[1]))
+        ckpt_path = scored[0][2]
+        logger.info(f"Exporting {lang} best_model from {ckpt_path} …")
+        try:
+            # weights_only=False required for Lightning checkpoints on torch>=2.6
+            try:
+                blob = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+            except TypeError:
+                blob = torch.load(str(ckpt_path), map_location="cpu")
+            state = blob.get("state_dict", blob) if isinstance(blob, dict) else blob
+            # Strip Lightning prefix model.
+            cleaned = {}
+            for k, v in state.items():
+                nk = k
+                if nk.startswith("model."):
+                    nk = nk[len("model.") :]
+                cleaned[nk] = v
+            # Need a base architecture; processor from facebook/mms-300m or fine-tune config if present
+            base_id = "facebook/mms-300m"
+            processor = Wav2Vec2Processor.from_pretrained(base_id, target_lang=lang)
+            model = Wav2Vec2ForCTC.from_pretrained(
+                base_id, target_lang=lang, ignore_mismatched_sizes=True
+            )
+            missing, unexpected = model.load_state_dict(cleaned, strict=False)
+            logger.info(
+                f"  load_state_dict {lang}: missing={len(missing)} unexpected={len(unexpected)}"
+            )
+            best.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(str(best))
+            processor.save_pretrained(str(best))
+            try:
+                processor.tokenizer.set_target_lang(lang)
+            except Exception:
+                pass
+            logger.info(f"  Wrote {best}")
+        except Exception as exc:
+            logger.warning(f"Failed to export best_model for {lang} from ckpt: {exc}")
+
+
 def main():
     logger.info("Initializing high-performance parallel inference pipeline...")
     configure_hf_cache()
 
-    # 1. Resolve paths
+    # 1. Resolve paths — SampleSubmission is the Zindi contract (preferred over Test.csv)
     test_csv_path = "Test.csv"
     if not os.path.exists(test_csv_path):
         found = glob.glob("**/Test.csv", recursive=True)
         if found:
             test_csv_path = found[0]
 
-    logger.info(f"Loading test CSV from: {test_csv_path}")
+    logger.info(f"Loading expected IDs (SampleSubmission preferred) near: {test_csv_path}")
     test_ids = _read_expected_submission_ids(test_csv_path)
+    logger.info(f"Expected submission size: {len(test_ids)} IDs")
 
     # 2. Define target languages
     target_languages = ["lin", "sna", "lug"]
@@ -898,17 +1075,30 @@ def main():
         if idx + 1 < len(sys.argv):
             max_blank_frac = float(sys.argv[idx + 1])
 
+    # 2b. Export best_model from Lightning ckpt when missing (e.g. lin after partial Kaggle restore)
+    if "--skip-export-best" not in sys.argv:
+        _ensure_best_models_from_checkpoints(target_languages)
+
     # 3. Load audio once (shared by main pass + blank retry)
     audio_dict = _load_test_audio_dict(test_ids)
     logger.info(
         f"Audio cache ready: {len(audio_dict)} / {len(test_ids)} expected IDs "
         f"({len(audio_dict)/max(len(test_ids),1):.1%} coverage)"
     )
+    if len(audio_dict) < len(test_ids):
+        missing_audio = [i for i in test_ids if i not in audio_dict]
+        logger.warning(
+            f"{len(missing_audio)} IDs have no audio — they would become Zindi "
+            f"'Missing entries' if Target were left empty. Sample: {missing_audio[:10]}"
+        )
 
     # 4. Main parallel pass
     combined = _run_parallel_inference(
         test_ids, audio_dict, target_languages, hf_token, prefer_gemma=prefer_gemma
     )
+    # Guarantee every expected key exists before retry/write
+    for aid in test_ids:
+        combined.setdefault(aid, "")
 
     # 5. Retry blanks (eliminates need for transcribe_missing.py)
     blank_ids = [aid for aid in test_ids if not str(combined.get(aid, "")).strip()]
@@ -921,11 +1111,22 @@ def main():
                 combined[aid] = str(text)
 
     # 6. Validate and write (fails hard if blank rate is still too high)
+    #    Empty Targets are replaced with a space so Zindi never sees NaN → "Missing entries".
     _write_validated_submission(
         test_ids,
         combined,
         output_path="submission.csv",
         max_blank_frac=max_blank_frac,
+    )
+
+    # 7. Final human-readable integrity report
+    check = pd.read_csv("submission.csv", dtype=str)
+    n = len(check)
+    n_blank = int(check["Target"].fillna("").astype(str).str.strip().eq("").sum())
+    logger.info(
+        f"INTEGRITY: rows={n} expected={len(test_ids)} "
+        f"id_set_match={set(check['ID'].astype(str)) == set(test_ids)} "
+        f"whitespace_placeholders={n_blank}"
     )
     logger.info("Successfully generated submission.csv in the correct format!")
 
