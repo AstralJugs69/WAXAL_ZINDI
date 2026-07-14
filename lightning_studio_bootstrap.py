@@ -204,6 +204,26 @@ def cmd_upload(args):
     run(cmd, check=False)
 
 
+def cmd_download(args):
+    """Restore checkpoints from Kaggle (ignores broken size=0 list column)."""
+    configure_env()
+    ensure_repo()
+    os.chdir(REPO)
+    cmd = [
+        sys.executable,
+        "scripts/download_checkpoints_kaggle.py",
+        "--dataset",
+        args.dataset,
+        "--outputs",
+        str(OUTPUTS),
+        "--download-dir",
+        args.download_dir,
+    ]
+    if args.list_only:
+        cmd.append("--list-only")
+    run(cmd, check=False)
+
+
 def cmd_submit(args):
     configure_env()
     ensure_repo()
@@ -250,6 +270,15 @@ def main():
     p_up.add_argument("--skip-pack", action="store_true", help="Reuse existing .tar.gz packs")
     p_up.add_argument("--public", action="store_true")
     p_up.set_defaults(func=cmd_upload)
+
+    p_dl = sub.add_parser("download", help="Download/restore checkpoints from Kaggle")
+    p_dl.add_argument(
+        "--dataset",
+        default="cashgenenator/waxal-mms-checkpoints",
+    )
+    p_dl.add_argument("--download-dir", default="./ckpt_dl")
+    p_dl.add_argument("--list-only", action="store_true")
+    p_dl.set_defaults(func=cmd_download)
 
     p_sub = sub.add_parser("submit", help="Generate submission.csv")
     p_sub.add_argument("--max-blank-frac", type=float, default=0.05)

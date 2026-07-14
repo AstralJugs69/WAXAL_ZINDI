@@ -178,6 +178,9 @@ python -m src.training.lightning_mms \
 
 ### 4.1 One block: clone + restore checkpoints + env (start here)
 
+**Note:** `kaggle datasets list -m` often shows **size=0** even when the dataset is ~59GB
+(web Data Explorer is correct: folders `lin/sna/lug_mms-300m_fold0`). Use the download helper.
+
 ```bash
 # === NEW LIGHTNING VM — restore from Kaggle checkpoints ===
 export STUDIO=/teamspace/studios/this_studio
@@ -198,27 +201,21 @@ else
   git clone --depth 1 https://github.com/AstralJugs69/WAXAL_ZINDI.git
   cd WAXAL_ZINDI
 fi
-git log -1 --oneline
+GIT_PAGER=cat git log -1 --oneline
 
 pip install -q kaggle
+# Reliable restore (handles list size=0 quirk + folder layout, not tar.gz)
+python scripts/download_checkpoints_kaggle.py \
+  --dataset cashgenenator/waxal-mms-checkpoints \
+  --outputs "$WAXAL_OUTPUTS_DIR" \
+  --download-dir ./ckpt_dl
 
-mkdir -p outputs ckpt_dl
-# Download checkpoint packs (private dataset under cashgenenator)
-python -m kaggle datasets download \
-  -d cashgenenator/waxal-mms-checkpoints \
-  -p ./ckpt_dl --unzip
-
-# Unpack into outputs/
-for f in ckpt_dl/*_mms-300m_fold0.tar.gz; do
-  echo "Extracting $f ..."
-  tar -xzf "$f" -C outputs/
-done
+# or: python lightning_studio_bootstrap.py download
 
 ls -la outputs/
 ls outputs/*/checkpoints 2>/dev/null
 ls outputs/*/best_model 2>/dev/null
-
-echo "Checkpoints restored. Next: CPU prep (if needed) or submission/train."
+echo "Checkpoints restored."
 ```
 
 ### 4.2 CPU prep (only if HF cache missing — free/cheap machine)

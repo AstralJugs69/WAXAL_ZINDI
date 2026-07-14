@@ -59,28 +59,48 @@ Open that URL while logged into Kaggle. You should see the `.tar.gz` files.
 
 ## Download on a **new** Lightning / Kaggle machine
 
+**Important quirks (do not trust these blindly):**
+
+| Command / UI | Reality |
+|--------------|---------|
+| `kaggle datasets list -m` **size column** | Often shows **0** even when dataset is ~59GB (web UI is correct) |
+| Web **Data Explorer** | Source of truth — folders `lin/sna/lug_mms-300m_fold0` |
+| Layout | May be **folders**, not `.tar.gz` |
+
+### Recommended (handles quirks)
+
 ```bash
-export KAGGLE_CONFIG_DIR=$HOME/.kaggle   # if kaggle.json is there
-# or copy kaggle.json to ~/.kaggle/kaggle.json
-
 cd /teamspace/studios/this_studio/WAXAL_ZINDI
-mkdir -p outputs ckpt_dl
+git pull origin main
 
-# replace USER with your Kaggle username (from kaggle.json)
-kaggle datasets download -d USER/waxal-mms-checkpoints -p ./ckpt_dl --unzip
+mkdir -p $HOME/.kaggle
+cp -f /teamspace/studios/this_studio/kaggle.json $HOME/.kaggle/kaggle.json
+chmod 600 $HOME/.kaggle/kaggle.json
 
-# each file is a full language output tree
-tar -xzf ckpt_dl/lin_mms-300m_fold0.tar.gz -C outputs/
-tar -xzf ckpt_dl/sna_mms-300m_fold0.tar.gz -C outputs/
-tar -xzf ckpt_dl/lug_mms-300m_fold0.tar.gz -C outputs/
+export WAXAL_OUTPUTS_DIR=/teamspace/studios/this_studio/WAXAL_ZINDI/outputs
 
-ls outputs/*/checkpoints outputs/*/best_model
+# lists files (may be incomplete) + downloads + moves into outputs/
+python scripts/download_checkpoints_kaggle.py \
+  --dataset cashgenenator/waxal-mms-checkpoints
 ```
 
-Same with Python module:
+### Manual CLI fallback
 
 ```bash
-python -m kaggle datasets download -d USER/waxal-mms-checkpoints -p ./ckpt_dl --unzip
+mkdir -p outputs ckpt_dl
+python -m kaggle datasets files cashgenenator/waxal-mms-checkpoints
+python -m kaggle datasets download -d cashgenenator/waxal-mms-checkpoints -p ./ckpt_dl --force
+ls -lh ckpt_dl/
+# unzip if needed
+cd ckpt_dl && unzip -q *.zip; cd ..
+# move folders
+for d in lin_mms-300m_fold0 sna_mms-300m_fold0 lug_mms-300m_fold0; do
+  find ckpt_dl -type d -name "$d" | head -1 | while read p; do
+    rm -rf outputs/$d
+    mv "$p" outputs/
+  done
+done
+ls outputs/*/
 ```
 
 ---
