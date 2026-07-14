@@ -263,6 +263,22 @@ def main():
     if not archives:
         raise SystemExit("Nothing to upload. Check outputs/ and --langs.")
 
+    # Hard gate: refuse empty/tiny packs (previous empty Kaggle dataset was size=0)
+    log("Staging contents:")
+    total = 0
+    for dest in archives:
+        sz = dest.stat().st_size
+        total += sz
+        log(f"  {dest.name}: {sz / 1e9:.2f} GB")
+        if sz < 1_000_000:
+            raise SystemExit(
+                f"Refusing upload: {dest.name} is only {sz} bytes (expected multi-GB). "
+                "Re-pack without --skip-pack from real outputs/."
+            )
+    log(f"  TOTAL staging payload: {total / 1e9:.2f} GB")
+    if total < 1_000_000:
+        raise SystemExit("Refusing upload: total payload too small (would create empty dataset).")
+
     dataset_id = write_metadata(
         staging,
         owner=owner,
@@ -271,50 +287,58 @@ def main():
         is_private=not args.public,
     )
 
-    # Kaggle CLI: create vs version
+    # Prefer plain create/version WITHOUT --dir-mode tar: that mode has created empty
+    # datasets on some Kaggle CLI versions when large files are present.
     exists = dataset_exists(kaggle_cmd, dataset_id)
     if not exists:
         log(f"Creating NEW private dataset {dataset_id} …")
-        # --dir-mode tar keeps large files simpler than zip on some CLIs
-        cmd = kaggle_cmd + [
-            "datasets",
-            "create",
-            "-p",
-            str(staging),
-            "--dir-mode",
-            "tar",
-        ]
-        rc = run(cmd, check=False)
-        if rc != 0:
-            log("create with --dir-mode tar failed; retrying without dir-mode…")
-            run(kaggle_cmd + ["datasets", "create", "-p", str(staging)], check=True)
+        log("(This can take a long time for multi‑GB files — do not interrupt.)")
+        run(kaggle_cmd + ["datasets", "create", "-p", str(staging)], check=True)
     else:
-        log(f"Dataset exists → uploading NEW VERSION of {dataset_id} …")
-        cmd = kaggle_cmd + [
-            "datasets",
-            "version",
-            "-p",
-            str(staging),
-            "-m",
-            args.message,
-            "--dir-mode",
-            "tar",
-        ]
-        rc = run(cmd, check=False)
-        if rc != 0:
-            log("version with --dir-mode tar failed; retrying without dir-mode…")
-            run(
-                kaggle_cmd
-                + ["datasets", "version", "-p", str(staging), "-m", args.message],
-                check=True,
-            )
+        log(f"Dataset exists (may be empty shell) → uploading NEW VERSION of {dataset_id} …")
+        log("(This can take a long time for multi‑GB files — do not interrupt.)")
+        run(
+            kaggle_cmd
+            + ["datasets", "version", "-p", str(staging), "-m", args.message],
+            check=True,
+        )
+
+    # Verify non-empty on Kaggle side
+    log("Verifying dataset file list…")
+    vf = subprocess.run(
+        kaggle_cmd + ["datasets", "files", dataset_id],
+        capture_output=True,
+        text=True,
+    )
+    log(vf.stdout or vf.stderr or "(no files output)")
+    if vf.returncode != 0 or "No files" in (vf.stdout or "") + (vf.stderr or ""):
+        log("WARNING: dataset may still be empty. Check Kaggle web UI file list.")
+    # size check via list -m
+    vl = subprocess.run(
+        kaggle_cmd + ["datasets", "list", "-m", "--csv"],
+        capture_output=True,
+        text=True,
+    )
+    if vl.returncode == 0 and args.slug in (vl.stdout or ""):
+        for line in (vl.stdout or "").splitlines():
+            if args.slug in line:
+                log(f"Kaggle list row: {line}")
+                # crude: size column 0 is bad
+                if ",0," in line.replace(" ", "") or line.strip().endswith(",0"):
+                    log(
+                        "ERROR: dataset size still reports 0. Upload did not attach data.\n"
+                        "Try from the machine that still has the large .tar.gz files:\n"
+                        "  python scripts/upload_checkpoints_kaggle.py --langs lin,sna,lug\n"
+                        "and watch that Kaggle CLI prints progress for multi-GB files."
+                    )
+                    raise SystemExit(2)
 
     log("")
     log("=" * 64)
     log("UPLOAD FINISHED")
     log(f"  Dataset: https://www.kaggle.com/datasets/{dataset_id}")
     log("  On a new machine:")
-    log(f"    kaggle datasets download -d {dataset_id} -p ./ckpt_dl --unzip")
+    log(f"    python -m kaggle datasets download -d {dataset_id} -p ./ckpt_dl --unzip")
     log("    mkdir -p outputs && tar -xzf ckpt_dl/sna_mms-300m_fold0.tar.gz -C outputs/")
     log("=" * 64)
 
