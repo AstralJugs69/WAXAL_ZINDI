@@ -105,19 +105,21 @@ def setup_kaggle_json():
 
 def cmd_prep(args):
     """CPU-only: cache extract + external + fold CSVs (no training)."""
-    configure_env()
+    configure_env(getattr(args, "hf_token", None))
     ensure_repo()
     setup_kaggle_json()
     os.chdir(REPO)
-    # Prefer dedicated prep script (download Kaggle chunks + models + external + folds)
-    run([sys.executable, "scripts/setup_data_cpu.py", "--repo", str(REPO)], check=False)
+    prep_cmd = [sys.executable, "scripts/setup_data_cpu.py", "--repo", str(REPO)]
+    if getattr(args, "hf_token", None):
+        prep_cmd.extend(["--hf_token", args.hf_token])
+    run(prep_cmd, check=False)
     log("\n=== PREP DONE (no training) ===")
     log("Next (GPU machine): python lightning_studio_bootstrap.py train --lang lug --epochs 10")
 
 
 def cmd_train(args):
     """GPU train one or more languages with the proven recipe."""
-    configure_env()
+    configure_env(getattr(args, "hf_token", None))
     ensure_repo()
     os.chdir(REPO)
 
@@ -182,7 +184,7 @@ def cmd_train(args):
 
 def cmd_upload(args):
     """Upload checkpoints to Kaggle as a private dataset (uses kaggle.json)."""
-    configure_env()
+    configure_env(getattr(args, "hf_token", None))
     ensure_repo()
     os.chdir(REPO)
     cmd = [
@@ -206,7 +208,7 @@ def cmd_upload(args):
 
 def cmd_download(args):
     """Restore checkpoints from Kaggle (ignores broken size=0 list column)."""
-    configure_env()
+    configure_env(getattr(args, "hf_token", None))
     ensure_repo()
     os.chdir(REPO)
     cmd = [
@@ -225,13 +227,18 @@ def cmd_download(args):
 
 
 def cmd_submit(args):
-    configure_env()
+    configure_env(getattr(args, "hf_token", None))
     ensure_repo()
     os.chdir(REPO)
-    run(
-        [sys.executable, "generate_submission.py", "--max-blank-frac", str(args.max_blank_frac)],
-        check=False,
-    )
+    sub_cmd = [
+        sys.executable,
+        "generate_submission.py",
+        "--max-blank-frac",
+        str(args.max_blank_frac),
+    ]
+    if getattr(args, "hf_token", None):
+        sub_cmd.extend(["--hf_token", args.hf_token])
+    run(sub_cmd, check=False)
     sub = REPO / "submission.csv"
     if sub.exists():
         dest = STUDIO / "submission.csv"
@@ -241,12 +248,23 @@ def cmd_submit(args):
 
 def main():
     parser = argparse.ArgumentParser(description="WAXAL Lightning studio bootstrap")
+    # Global token arg works before subcommand too if placed after subcommand name
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    def add_hf_token(p):
+        p.add_argument(
+            "--hf_token",
+            type=str,
+            default=None,
+            help="Hugging Face token (optional; for Common Voice / gated assets). Do not commit.",
+        )
+
     p_prep = sub.add_parser("prep", help="CPU data prep (Kaggle cache + external + folds)")
+    add_hf_token(p_prep)
     p_prep.set_defaults(func=cmd_prep)
 
     p_train = sub.add_parser("train", help="GPU train MMS (Lightning)")
+    add_hf_token(p_train)
     p_train.add_argument("--lang", type=str, default=None, help="Single language lin|sna|lug")
     p_train.add_argument("--langs", type=str, default="lin,sna,lug")
     p_train.add_argument("--epochs", type=int, default=8)
@@ -259,6 +277,7 @@ def main():
     p_train.set_defaults(func=cmd_train)
 
     p_up = sub.add_parser("upload", help="Upload checkpoints to Kaggle dataset")
+    add_hf_token(p_up)
     p_up.add_argument("--langs", type=str, default="lin,sna,lug")
     p_up.add_argument(
         "--slug",
@@ -272,6 +291,7 @@ def main():
     p_up.set_defaults(func=cmd_upload)
 
     p_dl = sub.add_parser("download", help="Download/restore checkpoints from Kaggle")
+    add_hf_token(p_dl)
     p_dl.add_argument(
         "--dataset",
         default="cashgenenator/waxal-mms-checkpoints",
@@ -281,6 +301,7 @@ def main():
     p_dl.set_defaults(func=cmd_download)
 
     p_sub = sub.add_parser("submit", help="Generate submission.csv")
+    add_hf_token(p_sub)
     p_sub.add_argument("--max-blank-frac", type=float, default=0.05)
     p_sub.set_defaults(func=cmd_submit)
 

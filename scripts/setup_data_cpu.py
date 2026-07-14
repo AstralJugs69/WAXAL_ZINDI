@@ -368,7 +368,17 @@ def main():
     parser.add_argument("--skip-folds", action="store_true")
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--repo", type=str, default=None, help="Path to WAXAL_ZINDI checkout")
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="Hugging Face token (optional). Prefer this over hardcoding; do not commit.",
+    )
     args = parser.parse_args()
+    if args.hf_token:
+        os.environ["HF_TOKEN"] = args.hf_token.strip()
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = args.hf_token.strip()
+        print("HF_TOKEN set from --hf_token (value not printed)", flush=True)
 
     studio = resolve_studio_root()
     paths = configure_paths(studio)
