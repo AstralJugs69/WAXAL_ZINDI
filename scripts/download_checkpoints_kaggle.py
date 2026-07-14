@@ -85,74 +85,84 @@ def list_all_files(api, dataset_id: str) -> list[str]:
     Returns list of remote relative paths.
     """
     names: list[str] = []
-    # Newer kaggle API: dataset_list_files may not paginate; try page tokens via raw CLI first
-    cmd = kaggle_cmd()
-    page_token = None
-    page = 0
-    while True:
-        page += 1
-        c = cmd + ["datasets", "files", dataset_id, "-v", "--csv"]
-        if page_token:
-            # Some CLI versions support --page-token; if not, break after first page
-            c.extend(["--page-token", page_token])
-        r = run_capture(c)
-        out = r.stdout or ""
-        err = r.stderr or ""
-        if page == 1:
-            log("--- kaggle datasets files (page 1) ---")
-            # Don't dump huge tokens every time
-            for line in (out + err).splitlines()[:5]:
-                if "Next Page Token" in line:
-                    log("(has next page token… will paginate)")
-                elif line.strip():
-                    log(line[:200])
+    owner, slug = dataset_id.split("/", 1)
 
-        # Parse next page token if present
-        new_token = None
-        for line in (out + err).splitlines():
-            if "Next Page Token" in line or "nextPageToken" in line.lower():
-                # formats: "Next Page Token = TOKEN" or CSV field
-                if "=" in line:
-                    new_token = line.split("=", 1)[-1].strip()
-                else:
-                    parts = line.split()
-                    if parts:
-                        new_token = parts[-1].strip()
-
-        for line in out.splitlines():
-            line = line.strip()
-            if not line or line.lower().startswith("name"):
-                continue
-            if "Next Page Token" in line:
-                continue
-            name = line.split(",")[0].strip().strip('"')
-            if name and name not in names and not name.startswith("Next"):
-                names.append(name)
-
-        if not new_token or new_token == page_token:
-            # CLI may not support page-token; use Python API pagination if available
-            break
-        page_token = new_token
-        if page > 100:
-            log("WARNING: stopped pagination at 100 pages")
-            break
-        time.sleep(0.2)
-
-    # Python API fallback / fill
+    # --- Preferred: underlying API with page_token (full list) ---
     try:
-        # dataset_list_files returns first page only on many versions
-        fl = api.dataset_list_files(dataset_id)
-        file_list = getattr(fl, "files", fl) or []
-        for f in file_list:
-            n = getattr(f, "name", None) or str(f)
-            if n and n not in names:
-                names.append(n)
-    except Exception as exc:
-        log(f"Python list_files note: {exc}")
+        page_token = None
+        page = 0
+        while True:
+            page += 1
+            kwargs = {"page_size": 100}
+            if page_token:
+                kwargs["page_token"] = page_token
+            # Method signatures differ across kaggle-api versions
+            try:
+                resp = api.datasets_list_files(owner, slug, **kwargs)
+            except TypeError:
+                try:
+                    resp = api.dataset_list_files(dataset_id)
+                except Exception:
+                    resp = None
+                if resp is not None:
+                    file_list = getattr(resp, "files", resp) or []
+                    for f in file_list:
+                        n = getattr(f, "name", None) or str(f)
+                        if n and n not in names:
+                            names.append(n)
+                break
 
-    # If still short, try walking with page-token via API raw if present
-    if hasattr(api, "dataset_list_files_with_http_info"):
-        pass
+            if resp is None:
+                break
+            file_list = getattr(resp, "files", None) or getattr(resp, "dataset_files", None) or []
+            # resp may be a list
+            if isinstance(resp, list):
+                file_list = resp
+            for f in file_list:
+                n = getattr(f, "name", None) or (f.get("name") if isinstance(f, dict) else str(f))
+                if n and n not in names:
+                    names.append(n)
+            page_token = (
+                getattr(resp, "next_page_token", None)
+                or getattr(resp, "nextPageToken", None)
+                or (resp.get("nextPageToken") if isinstance(resp, dict) else None)
+            )
+            log(f"  list page {page}: +{len(file_list)} files (total {len(names)})")
+            if not page_token:
+                break
+            if page > 200:
+                log("WARNING: stopped API pagination at 200 pages")
+                break
+            time.sleep(0.15)
+    except Exception as exc:
+        log(f"API pagination note: {exc}")
+
+    # --- CLI fallback with next-page token parsing ---
+    if len(names) < 5:
+        cmd = kaggle_cmd()
+        page_token = None
+        page = 0
+        while True:
+            page += 1
+            c = cmd + ["datasets", "files", dataset_id, "-v", "--csv"]
+            r = run_capture(c)
+            out = r.stdout or ""
+            err = r.stderr or ""
+            new_token = None
+            for line in (out + "\n" + err).splitlines():
+                if "Next Page Token" in line and "=" in line:
+                    new_token = line.split("=", 1)[-1].strip()
+            for line in out.splitlines():
+                line = line.strip()
+                if not line or line.lower().startswith("name") or "Next Page Token" in line:
+                    continue
+                name = line.split(",")[0].strip().strip('"')
+                if name and name not in names:
+                    names.append(name)
+            # Many CLI builds ignore page token; avoid infinite loop
+            if not new_token or new_token == page_token or page >= 1:
+                break
+            page_token = new_token
 
     log(f"Collected {len(names)} remote file path(s)")
     if names:
